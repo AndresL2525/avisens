@@ -1,0 +1,138 @@
+/*
+ * ============================================================================
+ *  config.h
+ * ----------------------------------------------------------------------------
+ *  Este archivo centraliza TODA la configuración del proyecto:
+ *    - Credenciales de WiFi
+ *    - URL y autenticación de Firebase
+ *    - Definición de pines físicos del ESP32
+ *    - Constantes de calibración y tiempos
+ *
+ *  Ventaja de tenerlo centralizado: si cambias de WiFi, de pines, o de
+ *  proyecto Firebase, solo tocas ESTE archivo y no tienes que buscar en
+ *  cada módulo del código.
+ * ============================================================================
+ */
+
+#ifndef CONFIG_H
+#define CONFIG_H
+
+// ────────────────────────────────────────────────────────────────────────
+// 1. CREDENCIALES WIFI
+// ────────────────────────────────────────────────────────────────────────
+#define WIFI_SSID "COLOCA_TU_RED_WIFI"
+#define WIFI_PASSWORD "1234567890"
+
+// ────────────────────────────────────────────────────────────────────────
+// 2. FIREBASE REALTIME DATABASE
+// ────────────────────────────────────────────────────────────────────────
+// La URL la obtienes en Firebase Console -> Realtime Database
+// Ejemplo: https://mi-proyecto-default-rtdb.firebaseio.com
+#define FIREBASE_HOST "https://mi-proyecto-default-rtdb.firebaseio.com"
+
+// El "secret" lo obtienes en: Configuración del Proyecto -> Cuentas de
+// Servicio -> Secretos de la Base de Datos en Tiempo Real (Legacy)
+// Nota: para producción se recomienda usar Firebase Auth en vez de secret,
+// pero para un proyecto académico el secret es suficiente y más simple.
+#define FIREBASE_AUTH "COLOCA_TU_API_KEY_AQUI"
+
+// Nodo dentro de la base de datos donde se guardarán las lecturas
+#define FIREBASE_PATH "/sensores"
+
+// ────────────────────────────────────────────────────────────────────────
+// 3. PINES — SENSOR DHT11 (temperatura y humedad ambiente)
+// ────────────────────────────────────────────────────────────────────────
+#define DHT_PIN 5      // Pin de datos del DHT11
+#define DHT_TYPE DHT11 // Tipo de sensor (DHT11, no DHT22)
+
+// ────────────────────────────────────────────────────────────────────────
+// 4. PINES — CELDA DE CARGA + HX711
+// ────────────────────────────────────────────────────────────────────────
+#define HX711_DOUT_PIN 16 // DOUT del módulo HX711
+#define HX711_SCK_PIN 17  // SCK (clock) del módulo HX711
+
+// Factor de calibración de la celda de carga.
+// IMPORTANTE: este valor es ÚNICO para cada celda de carga física.
+// Más abajo en este mismo archivo se explica cómo obtenerlo.
+#define FACTOR_CALIBRACION_CELDA -7050.0
+
+// ────────────────────────────────────────────────────────────────────────
+// 5. PINES — PANTALLA OLED (I2C, controlador SH1106, 128x64)
+// ────────────────────────────────────────────────────────────────────────
+// El ESP32 usa por defecto:
+//   SDA -> GPIO21
+//   SCL -> GPIO22
+// No es necesario redefinirlos en código porque U8g2 + Wire los usan
+// automáticamente, pero los dejamos documentados aquí como referencia.
+#define OLED_SDA_PIN 21
+#define OLED_SCL_PIN 22
+#define OLED_I2C_ADDR 0x3C
+
+// ────────────────────────────────────────────────────────────────────────
+// 6. TIEMPOS DEL SISTEMA (en milisegundos)
+// ────────────────────────────────────────────────────────────────────────
+#define INTERVALO_LECTURA_SENSORES 2000  // Cada cuánto se leen los sensores
+#define INTERVALO_ENVIO_FIREBASE 5000    // Cada cuánto se envía a Firebase
+#define INTERVALO_REFRESCO_PANTALLA 1000 // Cada cuánto se redibuja el OLED
+
+// ────────────────────────────────────────────────────────────────────────
+// PINES PARA SENSORES ADICIONALES
+// ────────────────────────────────────────────────────────────────────────
+#define KY032_PIN 13 // Detector de obstáculos (salida digital)
+#define MQ135_PIN 34 // Sensor de calidad del aire (salida analógica)
+
+// ────────────────────────────────────────────────────────────────────────
+// 7. PINES — ACTUADORES (relés de 1 canal cada uno, activos en HIGH)
+// ────────────────────────────────────────────────────────────────────────
+// IMPORTANTE: estos relés controlan cargas de 110V/220V (bombillo,
+// extractor, etc). El ESP32 SOLO controla la bobina del relé (5V/3.3V);
+// nunca debe conectarse directamente a la carga de alto voltaje.
+#define RELE_CALEFACTOR_PIN 25    // Bombillo calefactor
+#define RELE_EXTRACTOR_PIN 26     // Extractor / ventilación
+#define RELE_HUMIDIFICADOR_PIN 27 // Humidificador
+#define RELE_ALIMENTADOR_PIN 32   // Motorreductor del tornillo sin fin
+
+// ────────────────────────────────────────────────────────────────────────
+// 8. UMBRALES DE AUTOMATIZACIÓN (rangos fijos, ver documento de
+//    investigación de temperatura avícola para más detalle)
+// ────────────────────────────────────────────────────────────────────────
+// Temperatura (°C): por debajo de este valor, se activa el calefactor
+#define UMBRAL_TEMP_BAJA 18.0
+// Temperatura (°C): por encima de este valor, se activa el extractor
+#define UMBRAL_TEMP_ALTA 28.0
+// Calidad de aire (valor crudo ADC 0-4095): por encima, se activa el extractor
+#define UMBRAL_AIRE_MALO 2000
+// Humedad (%): por debajo, se activa el humidificador
+#define UMBRAL_HUMEDAD_BAJA 50
+// Humedad (%): por encima, se desactiva el humidificador (zona de histéresis)
+#define UMBRAL_HUMEDAD_ALTA 70
+
+// ────────────────────────────────────────────────────────────────────────
+// 9. PARÁMETROS DEL ALIMENTADOR AUTOMÁTICO
+// ────────────────────────────────────────────────────────────────────────
+// Tiempo máximo que el motorreductor puede girar de una sola vez (límite
+// de seguridad por tiempo, independiente del peso del plato).
+#define ALIMENTADOR_TIEMPO_MAX_MS 8000
+// Peso (gramos) en el plato a partir del cual se considera "lleno" y se
+// detiene el alimentador antes de llegar al tiempo máximo.
+#define ALIMENTADOR_PESO_OBJETIVO_G 300.0
+// Cada cuánto se permite una nueva alimentación automática (evita que el
+// motor arranque en cada ciclo de lectura si el plato sigue vacío).
+#define ALIMENTADOR_INTERVALO_MS (4UL * 60UL * 60UL * 1000UL) // 4 horas
+
+#endif // CONFIG_H
+
+/*
+ * ============================================================================
+ *  CÓMO CALIBRAR LA CELDA DE CARGA (FACTOR_CALIBRACION_CELDA)
+ * ----------------------------------------------------------------------------
+ *  1. Sube el proyecto con FACTOR_CALIBRACION_CELDA = -1
+ *  2. Abre el Monitor Serie y ejecuta balanza.tare() sin nada sobre la celda
+ *  3. Coloca un objeto de PESO CONOCIDO (ej. una pesa de 500g o 1kg)
+ *  4. Observa el valor crudo que imprime el Monitor Serie
+ *  5. Calcula:  factor = valor_crudo_leido / peso_real_en_kg_o_g
+ *  6. Reemplaza FACTOR_CALIBRACION_CELDA con ese resultado
+ *  7. El signo (+/-) depende de cómo conectaste los cables de la celda;
+ *     si el peso aparece negativo, simplemente invierte el signo del factor.
+ * ============================================================================
+ */

@@ -1,0 +1,42 @@
+# =============================================================================
+# AVÍSENS Backend - Docker Compose
+# =============================================================================
+# Uso:
+#   docker-compose up --build        # Construir y ejecutar
+#   docker-compose up -d             # Ejecutar en background
+#   docker-compose down              # Detener
+#   docker-compose logs -f backend   # Ver logs en tiempo real
+# =============================================================================
+
+version: "3.8"
+
+services:
+  backend:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: avisens-backend
+    restart: unless-stopped
+    ports:
+      - "8000:8000"
+    env_file:
+      - .env
+    environment:
+      # Sobrescribe valores de .env si es necesario
+      - ENVIRONMENT=production
+      - LOG_FORMAT=json
+    networks:
+      - avisens-network
+    # Limites de recursos (evita que el contenedor consuma toda la RAM/CPU)
+    deploy:
+      resources:
+        limits:
+          cpus: '1.0'
+          memory: 512M
+        reservations:
+          cpus: '0.25'
+          memory: 128M
+
+networks:
+  avisens-network:
+    driver: bridge
