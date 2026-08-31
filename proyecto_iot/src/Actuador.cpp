@@ -1,51 +1,37 @@
-/*
- * ============================================================================
- *  Actuador.cpp
- * ----------------------------------------------------------------------------
- *  Implementación del control físico de un relé genérico.
- * ============================================================================
- */
-
 #include "Actuador.h"
 
-Actuador::Actuador(const char* nombre, int pin)
-    : _nombre(nombre), _pin(pin), _encendido(false), _modo(ModoActuador::AUTO) {
+Actuador::Actuador(uint8_t pin)
+    : pin_(pin),
+      estado_(false) {
 }
 
-void Actuador::iniciar() {
-    pinMode(_pin, OUTPUT);
-    digitalWrite(_pin, LOW); // Empieza apagado por seguridad
-    _encendido = false;
+void Actuador::begin() {
+  pinMode(pin_, OUTPUT);
+  desactivar();  // Desactivado por defecto (HIGH)
 }
 
-void Actuador::establecerEstado(bool encendido) {
-    // Si ya está en el estado pedido, no hacemos nada (evita escribir
-    // el pin innecesariamente y, más importante, evita generar un
-    // evento/log duplicado cada vez que se llama esta función).
-    if (encendido == _encendido) return;
-
-    digitalWrite(_pin, encendido ? HIGH : LOW);
-    _encendido = encendido;
-
-    Serial.printf("[Actuador:%s] %s\n", _nombre, encendido ? "ENCENDIDO" : "APAGADO");
+void Actuador::activar() {
+  digitalWrite(pin_, LOW);  // Relé activo con LOW
+  estado_ = true;
 }
 
-void Actuador::establecerModo(ModoActuador modo) {
-    if (modo != _modo) {
-        Serial.printf("[Actuador:%s] Modo cambiado a %s\n",
-                      _nombre, modo == ModoActuador::AUTO ? "AUTO" : "MANUAL");
-    }
-    _modo = modo;
+void Actuador::desactivar() {
+  digitalWrite(pin_, HIGH);  // Relé inactivo con HIGH
+  estado_ = false;
 }
 
-bool Actuador::estaEncendido() const {
-    return _encendido;
+void Actuador::setEstado(bool estado) {
+  if (estado) {
+    activar();
+  } else {
+    desactivar();
+  }
 }
 
-ModoActuador Actuador::obtenerModo() const {
-    return _modo;
+bool Actuador::getEstado() const {
+  return estado_;
 }
 
-const char* Actuador::obtenerNombre() const {
-    return _nombre;
+void Actuador::conmutar() {
+  setEstado(!estado_);
 }

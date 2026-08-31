@@ -1,40 +1,63 @@
 #include "SensorDHT.h"
-#include <DHTesp.h>
-#include "config.h"
 
-static DHTesp dht;
-
-void SensorDHT::iniciar()
-{
-    dht.setup(DHT_PIN, DHTesp::DHT11);
-    delay(1500);
-    Serial.println("[DHT11] Sensor inicializado con DHTesp.");
+SensorDHT::SensorDHT()
+    : dht_(DHTPIN, DHTTYPE),
+      contadorFallos_(0),
+      ultimoIntento_(0) {
+  ultimaLectura_ = {0.0f, 0.0f, false, 0};
 }
 
-LecturaDHT SensorDHT::leer()
-{
-    LecturaDHT lectura;
+void SensorDHT::begin() {
+  dht_.begin();
+  LOG_DEBUG("SensorDHT inicializado");
+}
+
+LecturaDHT SensorDHT::leer() {
+  unsigned long ahora = millis();
+
+  // Lectura no bloqueante: DHT22 requiere ~2.25ms
+  float humedad = dht_.readHumidity();
+  float temperatura = dht_.readTemperature();
+
+  LecturaDHT lectura;
+  lectura.timestamp = ahora;
+
+  // Validación
+  if (isnan(humedad) || isnan(temperatura)) {
+    contadorFallos_++;
     lectura.valida = false;
 
-    for (int intento = 0; intento < 3; intento++)
-    {
-        float temp = dht.getTemperature();
-        float hum = dht.getHumidity();
+    Serial.print("⚠ DHT22 fallo #");
+    Serial.println(contadorFallos_);
 
-        if (!isnan(temp) && !isnan(hum))
-        {
-            lectura.temperatura = temp;
-            lectura.humedad = hum;
-            lectura.valida = true;
-            break;
-        }
-        delay(200);
+    if (contadorFallos_ >= MAX_FALLOS_SENSOR) {
+      LOG_ERROR("DHT22 fallo persistente — Entrando en ERROR");
     }
+  } else {
+    lectura.temperatura = temperatura;
+    lectura.humedad = humedad;
+    lectura.valida = true;
+    contadorFallos_ = 0;
+    ultimaLectura_ = lectura;
+  }
 
-    if (!lectura.valida)
-    {
-        Serial.println("[DHT11] Error de lectura (DHTesp)");
-    }
+  return lectura;
+}
 
-    return lectura;
+LecturaDHT SensorDHT::getUltimaLectura() const {
+  return ultimaLectura_;
+}
+
+bool SensorDHT::enError() const {
+  return contadorFallos_ >= MAX_FALLOS_SENSOR;
+}
+
+void SensorDHT::reiniciarFallos() {
+  contadorFallos_ = 0;
+}
+
+void SensorDHT::reset() {
+  contadorFallos_ = 0;
+  ultimaLectura_ = {0.0f, 0.0f, false, 0};
+  dht_.begin();
 }

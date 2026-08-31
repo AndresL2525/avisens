@@ -1,60 +1,59 @@
-/*
- * ============================================================================
- *  Actuador.h
- * ----------------------------------------------------------------------------
- *  Módulo genérico para controlar UN relé (calefactor, extractor,
- *  humidificador). Se reutiliza la misma clase para los 3, cambiando
- *  solo el pin — así evitamos repetir código 3 veces.
- *
- *  Cada actuador tiene un MODO:
- *    - AUTO:   el ESP32 decide solo, según la lectura de sensores.
- *    - MANUAL: el usuario (desde la app/web) impone un estado fijo,
- *              y el ESP32 lo respeta sin importar lo que digan los
- *              sensores, hasta que alguien vuelva a poner modo AUTO.
- *
- *  Esta clase NO decide cuándo encender o apagar (esa lógica vive en
- *  GestorActuadores.cpp); esta clase solo SABE encender/apagar el pin
- *  físico y recordar su propio estado y modo actual.
- * ============================================================================
- */
-
 #ifndef ACTUADOR_H
 #define ACTUADOR_H
 
 #include <Arduino.h>
+#include "config.h"
 
-enum class ModoActuador
-{
-    AUTO,
-    MANUAL
-};
+/**
+ * @class Actuador
+ * @brief Clase base para actuadores digitales (relés).
+ * 
+ * Define interfaz común para control de dispositivos de dos estados
+ * (ON/OFF). Lógica invertida: LOW = ON (relé activo), HIGH = OFF.
+ */
+class Actuador {
+ public:
+  /**
+   * @brief Constructor.
+   * @param pin GPIO del actuador
+   */
+  explicit Actuador(uint8_t pin);
 
-class Actuador
-{
-public:
-    // nombre: solo para identificar en logs / Firebase (ej. "calefactor")
-    Actuador(const char *nombre, int pin);
+  /**
+   * @brief Inicializa el pin como salida (desactivado).
+   */
+  virtual void begin();
 
-    // Configura el pin como salida y lo deja apagado.
-    void iniciar();
+  /**
+   * @brief Activa el actuador (LOW en relé).
+   */
+  virtual void activar();
 
-    // Enciende o apaga el relé físicamente, y recuerda el estado actual.
-    // Esta función la llaman tanto la lógica automática como las órdenes
-    // manuales -- es el único lugar que realmente toca el pin.
-    void establecerEstado(bool encendido);
+  /**
+   * @brief Desactiva el actuador (HIGH en relé).
+   */
+  virtual void desactivar();
 
-    // Cambia entre modo AUTO y MANUAL.
-    void establecerModo(ModoActuador modo);
+  /**
+   * @brief Establece estado del actuador.
+   * @param estado true para activar, false para desactivar
+   */
+  virtual void setEstado(bool estado);
 
-    bool estaEncendido() const;
-    ModoActuador obtenerModo() const;
-    const char *obtenerNombre() const;
+  /**
+   * @brief Obtiene estado actual del actuador.
+   * @return true si está activo, false si está inactivo
+   */
+  virtual bool getEstado() const;
 
-private:
-    const char *_nombre;
-    int _pin;
-    bool _encendido;
-    ModoActuador _modo;
+  /**
+   * @brief Conmuta el estado del actuador.
+   */
+  virtual void conmutar();
+
+ protected:
+  uint8_t pin_;
+  bool estado_;  // true = activo, false = inactivo
 };
 
 #endif // ACTUADOR_H

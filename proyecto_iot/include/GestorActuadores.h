@@ -1,94 +1,108 @@
-/*
- * ============================================================================
- *  GestorActuadores.h
- * ----------------------------------------------------------------------------
- *  Aquí vive la LÓGICA DE DECISIÓN: qué actuador debe encenderse según
- *  las lecturas actuales de los sensores. Es el "cerebro" autónomo del
- *  ESP32 que mencionamos en el diseño: el ESP32 decide solo, y las apps
- *  solo pueden anular (modo MANUAL) o volver a ceder el control (modo
- *  AUTO) a través de Firebase.
- *
- *  Cada actuador se evalúa de forma INDEPENDIENTE -- no hay arbitraje
- *  entre ellos porque cada uno controla hardware distinto (el
- *  calefactor no compite con el extractor por el mismo relé), así que
- *  es perfectamente válido que el calefactor esté encendido y el
- *  extractor también, si las condiciones de ambos se cumplen a la vez
- *  (ej. temperatura baja + mala calidad de aire simultáneas).
- *
- *  Para evitar que un actuador esté "parpadeando" cerca del límite
- *  exacto del umbral, usamos HISTÉRESIS en los umbrales de doble
- *  límite (humedad). Para los umbrales de un solo límite (temperatura,
- *  aire) el ESP32 ya promedia varias lecturas en los propios sensores,
- *  lo cual amortigua el ruido.
- * ============================================================================
- */
-
 #ifndef GESTOR_ACTUADORES_H
 #define GESTOR_ACTUADORES_H
 
 #include <Arduino.h>
+#include "config.h"
 #include "Actuador.h"
-#include "Alimentador.h"
 
-// Snapshot de lecturas que el gestor necesita para decidir. Mantenerlo
-// como struct evita pasar 5 parámetros sueltos a cada función.
-struct LecturasActuales
-{
-    float temperatura;
-    float humedad;
-    int calidadAire;
-    float pesoPlato;
-};
+/**
+ * @class GestorActuadores
+ * @brief Gestor centralizado de los 4 relés del sistema.
+ * 
+ * Controla:
+ * - K1: Calefacción/Bombillos infrarrojo
+ * - K2: Ventilador
+ * - K3: Extractor
+ * - K4: Bomba de agua
+ * 
+ * Implementa lógica de control con umbrales de temperatura,
+ * humedad y gases. Maneja fail-safe en caso de error de sensores.
+ */
+class GestorActuadores {
+ public:
+  /**
+   * @brief Constructor. Inicializa los 4 actuadores.
+   */
+  GestorActuadores();
 
-// Resultado de una decisión, usado para poder generar el evento/log
-// correspondiente sin que GestorActuadores conozca nada de Firebase.
-struct CambioActuador
-{
-    const char *nombre;
-    bool encendido;
-    const char *motivo;
-};
+  /**
+   * @brief Inicializa todos los pines como salidas (desactivados).
+   */
+  void begin();
 
-class GestorActuadores
-{
-public:
-    GestorActuadores();
+  /**
+   * @brief Aplica lógica de control basada en lecturas de sensores.
+   * 
+   * @param temperatura Temperatura en °C (DHT22)
+   * @param humedad Humedad relativa % (DHT22)
+   * @param rawNH3 Valor raw del MQ135
+   * @param distanciaAgua Distancia en cm (HC-SR04)
+   * @param estadoSensorUltrasonico Estado del sensor ultrasónico
+   * @param enErrorDHT true si DHT22 está en error
+   * @param enErrorUltrasonico true si HC-SR04 está en error
+   */
+  void actualizar(
+    float temperatura,
+    float humedad,
+    int rawNH3,
+    float distanciaAgua,
+    EstadoSensorUltrasonico estadoSensorUltrasonico,
+    bool enErrorDHT,
+    bool enErrorUltrasonico
+  );
 
-    void iniciar();
+  /**
+   * @brief Entra en modo Fail-Safe: desactiva todo salvo bomba (si error nivel agua).
+   */
+  void failSafe();
 
-    // Debe llamarse en cada ciclo de lectura de sensores. Internamente
-    // decide el estado de cada actuador y los aplica.
-    void evaluar(const LecturasActuales &lecturas);
+  /**
+   * @brief Obtiene estado de K1 (Calefacción).
+   */
+  bool getK1() const { return k1_.getEstado(); }
 
-    // ── Órdenes manuales desde Firebase (apps) ──────────────────────────
-    void establecerModoCalefactor(ModoActuador modo);
-    void establecerModoExtractor(ModoActuador modo);
-    void establecerModoHumidificador(ModoActuador modo);
-    void ordenManualCalefactor(bool encendido);
-    void ordenManualExtractor(bool encendido);
-    void ordenManualHumidificador(bool encendido);
-    void solicitarDosisManualAlimentador();
+  /**
+   * @brief Obtiene estado de K2 (Ventilador).
+   */
+  bool getK2() const { return k2_.getEstado(); }
 
-    // ── Getters para reportar estado a Firebase / OLED ──────────────────
-    const Actuador &calefactor() const;
-    const Actuador &extractor() const;
-    const Actuador &humidificador() const;
-    const Alimentador &alimentador() const;
+  /**
+   * @brief Obtiene estado de K3 (Extractor).
+   */
+  bool getK3() const { return k3_.getEstado(); }
 
-private:
-    Actuador _calefactor;
-    Actuador _extractor;
-    Actuador _humidificador;
-    Alimentador _alimentador;
+  /**
+   * @brief Obtiene estado de K4 (Bomba).
+   */
+  bool getK4() const { return k4_.getEstado(); }
 
-    // Estado interno para la histéresis del humidificador (necesita
-    // recordar si "ya estaba encendido" para no parpadear justo en el
-    // límite entre UMBRAL_HUMEDAD_BAJA y UMBRAL_HUMEDAD_ALTA).
-    bool _humidificadorEncendidoPrevio;
+  /**
+   * @brief Fuerza estado de un relé (principalmente para debug/emergencia).
+   * @param rele 1-4
+   * @param estado true para ON, false para OFF
+   */
+  void forzarRele(uint8_t rele, bool estado);
 
-    void evaluarCalefactor(float temperatura);
-    void evaluarExtractor(float temperatura, int calidadAire);
-    void evaluarHumidificador(float humedad);
+ private:
+  Actuador k1_;  // Calefacción
+  Actuador k2_;  // Ventilador
+  Actuador k3_;  // Extractor
+  Actuador k4_;  // Bomba
+
+  bool ultimoEstadoBomba_;
+  unsigned long ultimoControl_;
+
+  // Métodos de lógica interna
+  void aplicarControl(
+    bool activarCalefaccion,
+    bool activarVentilacion,
+    bool activarBomba
+  );
+
+  bool calcularActivacionBomba(
+    float distancia,
+    EstadoSensorUltrasonico estado
+  );
 };
 
 #endif // GESTOR_ACTUADORES_H

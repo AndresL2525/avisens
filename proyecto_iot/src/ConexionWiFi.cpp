@@ -1,59 +1,84 @@
-/*
- * ============================================================================
- *  ConexionWiFi.cpp
- * ----------------------------------------------------------------------------
- *  Implementación de la lógica de conexión WiFi.
- *  MODIFICADO: Incluye tiempo de espera (timeout) para no bloquear el programa.
- * ============================================================================
- */
-
 #include "ConexionWiFi.h"
-#include <WiFi.h>
-#include "config.h"
+#include <esp_log.h>
 
-void ConexionWiFi::conectar()
+static const char *TAG = "WiFi";
+
+ConexionWiFi::ConexionWiFi(const char *ssid, const char *password)
+    : ssid_(ssid),
+      password_(password),
+      hostname_("galponsmart"),
+      conectado_(false),
+      ultimoIntento_(0),
+      intervaloReconexion_(INTERVALO_RECONEXION_MS) {}
+
+void ConexionWiFi::comenzar()
 {
-    Serial.println("[WiFi] Iniciando conexion...");
+  ESP_LOGI(TAG, "Iniciando conexión WiFi asíncrona...");
 
-    // --- FUERZA el modo Estación (Cliente) ---
-    // Esto evita que el ESP32 intente crear su propia red WiFi.
-    WiFi.mode(WIFI_STA);
+  WiFi.mode(WIFI_STA);
+  WiFi.setHostname(hostname_.c_str());
+  WiFi.begin(ssid_, password_);
 
-    // Inicia la conexión con las credenciales de config.h
-    WiFi.begin(WIFI_SSID, WIFI_PASSWORD);
-
-    // --- TIEMPO DE ESPERA: 15 segundos ---
-    // Esto evita que el ESP32 se quede colgado para siempre.
-    unsigned long tiempoInicio = millis();
-    const unsigned long TIEMPO_MAXIMO = 15000; // 15 segundos
-
-    while (WiFi.status() != WL_CONNECTED && millis() - tiempoInicio < TIEMPO_MAXIMO)
-    {
-        delay(400);
-        Serial.print(".");
-    }
-
-    // --- Evaluar el resultado ---
-    Serial.println(); // Salto de línea después de los puntos
-
-    if (WiFi.status() == WL_CONNECTED)
-    {
-        Serial.print("[WiFi] Conectado. IP asignada: ");
-        Serial.println(WiFi.localIP());
-    }
-    else
-    {
-        Serial.println("[WiFi] ERROR: Tiempo de espera agotado.");
-        Serial.println("[WiFi] Revisa que la red sea 2.4GHz y las credenciales esten bien escritas.");
-    }
+  Serial.print("[WiFi] Conectando a SSID: ");
+  Serial.println(ssid_);
 }
 
-bool ConexionWiFi::estaConectado()
+void ConexionWiFi::actualizar()
 {
-    return WiFi.status() == WL_CONNECTED;
+  unsigned long ahora = millis();
+
+  if (WiFi.status() == WL_CONNECTED)
+  {
+    if (!conectado_)
+    {
+      conectado_ = true;
+      Serial.print("✓ WiFi conectado. IP: ");
+      Serial.println(WiFi.localIP());
+    }
+  }
+  else
+  {
+    if (conectado_)
+    {
+      conectado_ = false;
+      ESP_LOGW(TAG, "WiFi desconectado");
+      Serial.println("⚠ WiFi desconectado");
+    }
+
+    // Reintentar reconexión periódica
+    if (ahora - ultimoIntento_ >= intervaloReconexion_)
+    {
+      ultimoIntento_ = ahora;
+      Serial.print("[WiFi] Reconectando... Estado: ");
+      Serial.println(static_cast<int>(WiFi.status()));
+      WiFi.reconnect();
+    }
+  }
 }
 
-int ConexionWiFi::obtenerRSSI()
+bool ConexionWiFi::estaConectado() const
 {
-    return WiFi.RSSI();
+  return conectado_ && (WiFi.status() == WL_CONNECTED);
+}
+
+IPAddress ConexionWiFi::getIP() const
+{
+  return WiFi.localIP();
+}
+
+void ConexionWiFi::setHostname(const char *hostname)
+{
+  hostname_ = hostname;
+  if (estaConectado())
+  {
+    WiFi.setHostname(hostname);
+  }
+}
+
+void ConexionWiFi::desconectar()
+{
+  conectado_ = false;
+  WiFi.disconnect(true);
+  ESP_LOGI(TAG, "WiFi desconectado manualmente");
+  Serial.println("[WiFi] Desconectado.");
 }

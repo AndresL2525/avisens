@@ -1,302 +1,300 @@
-/*
- * ============================================================================
- *  main.cpp
- * ----------------------------------------------------------------------------
- *  Archivo principal del proyecto AVÍSENS.
- *
- *  Su única responsabilidad es ORQUESTAR los módulos: decide CUÁNDO se
- *  llama a cada uno, pero no contiene lógica interna de sensores, pantalla,
- *  actuadores ni de la API. Toda esa lógica vive en sus propios módulos.
- *
- *  Componentes usados:
- *    SENSORES:
- *      - DHT11             -> temperatura y humedad ambiente
- *      - HX711 + celda 1Kg -> peso del alimento en el plato
- *      - KY-032            -> detector de obstáculos por infrarrojos
- *      - MQ-135            -> calidad del aire
- *    SALIDA LOCAL:
- *      - OLED SH1106 I2C   -> visualización local
- *    ACTUADORES (relés):
- *      - Calefactor        -> temperatura baja
- *      - Extractor         -> temperatura alta O aire malo
- *      - Humidificador     -> humedad baja (con histéresis)
- *      - Alimentador       -> motorreductor + tornillo sin fin
- *    NUBE:
- *      - FastAPI (Backend propio) -> sensores, actuadores y eventos
- *
- *  DECISIÓN DE ARQUITECTURA: el ESP32 es AUTÓNOMO. Decide solo cuándo
- *  encender cada actuador según los sensores. Las apps (Android/Web)
- *  solo pueden VISUALIZAR y, opcionalmente, forzar un modo MANUAL que
- *  el ESP32 respeta hasta que se le devuelva el control en modo AUTO.
- * ============================================================================
- */
-
 #include <Arduino.h>
+#include <esp_task_wdt.h>
+#include <freertos/task.h>
+
 #include "config.h"
-#include "ConexionWiFi.h"
+#include "MovingAverage.h"
 #include "SensorDHT.h"
-#include "SensorPeso.h"
-#include "SensorKY032.h"
 #include "SensorMQ135.h"
-#include "PantallaOLED.h"
+#include "SensorKY032.h"
+#include "SensorUltrasonico.h"
+#include "SensorPeso.h"
+#include "Actuador.h"
 #include "GestorActuadores.h"
-#include "TokenManager.h"
-#include "ServicioAPI.h"
-#include "ServicioActuadoresAPI.h"
+#include "ControlServo.h"
+#include "Alimentador.h"
+#include "Persiana.h"
+#include "ConexionWiFi.h"
 
-// ──────────────────────────────────────────────────────────────────────
-// Instancias de cada módulo.
-// ──────────────────────────────────────────────────────────────────────
+// ═══════════════════════════════════════════════════════════
+// ─── INSTANCIAS GLOBALES (Memoria compartida Core 0) ──────
+// ═══════════════════════════════════════════════════════════
+
+EstadoSistema estadoSistema = EstadoSistema::INIT;
+
+// Sensores
 SensorDHT sensorDHT;
-SensorPeso sensorPeso;
-SensorKY032 sensorKY032;
 SensorMQ135 sensorMQ135;
-PantallaOLED pantalla;
-GestorActuadores actuadores;
-TokenManager tokenManager; // <-- NUEVO: gestor de tokens JWT
+SensorKY032 sensorKY032;
+SensorUltrasonico sensorUltrasonico;
+SensorPeso sensorPeso; // HX711 — Celda de carga
 
-// ──────────────────────────────────────────────────────────────────────
-// Variables de control de tiempo (sin delay() bloqueante).
-// ──────────────────────────────────────────────────────────────────────
+// Actuadores
+GestorActuadores gestorActuadores;
+ControlServo controlServo;
+Alimentador alimentador;
+Persiana persiana;
+
+// WiFi (Core 1)
+#if defined(WIFI_SSID) && defined(WIFI_PASS)
+ConexionWiFi conexionWiFi(WIFI_SSID, WIFI_PASS);
+#else
+ConexionWiFi conexionWiFi("prueba", "123456789");
+#endif
+
+// ─── Variables de sincronización ─────────────────────────
 unsigned long ultimaLecturaSensores = 0;
-unsigned long ultimoEnvioAPI = 0;
-unsigned long ultimoRefrescoPantalla = 0;
-unsigned long ultimaSincronizacionRemota = 0;
+unsigned long ultimaActuacion = 0;
 
-const unsigned long INTERVALO_SINCRONIZACION_REMOTA = 10000; // 10 segundos
+// ─── Counters para debug ──────────────────────────────────
+uint32_t ciclosTarea = 0;
+uint32_t erroresGlobales = 0;
 
-// Última lectura válida de cada sensor.
-float ultimaTemperatura = 0.0;
-float ultimaHumedad = 0.0;
-float ultimoPeso = 0.0;
-bool obstaculoDetectado = false;
-int calidadAireValor = 0;
-float calidadAireVoltaje = 0.0;
+// ═══════════════════════════════════════════════════════════
+// ─── TAREA PRINCIPAL — Core 0 (FreeRTOS) ────────────────
+// ═══════════════════════════════════════════════════════════
 
-// Guardamos el estado previo de cada actuador para detectar CAMBIOS y
-// generar un evento solo cuando algo realmente cambió (no en cada ciclo).
-bool estadoPrevioCalefactor = false;
-bool estadoPrevioExtractor = false;
-bool estadoPrevioHumidificador = false;
-
-// ──────────────────────────────────────────────────────────────────────
-// Genera un evento en la API solo si el estado del actuador cambió
-// desde la última vez que se revisó. Evita inundar /eventos con
-// registros repetidos del mismo estado en cada ciclo.
-// ──────────────────────────────────────────────────────────────────────
-void registrarSiCambio(const char *nombreActuador, bool estadoActual, bool &estadoPrevio,
-                       const char *mensajeEncendido, const char *mensajeApagado)
+void tareaGalpon(void *pvParameters)
 {
-    if (estadoActual != estadoPrevio)
+  esp_task_wdt_add(NULL);
+  Serial.println("[FreeRTOS] Watchdog Timer registrado en Core 0.");
+
+  static EstadoSistema ultimoEstadoImpreso = EstadoSistema::INIT;
+
+  for (;;)
+  {
+    unsigned long ahora = millis();
+    esp_task_wdt_reset();
+    ciclosTarea++;
+
+    // ─── Máquina de Estado Global ────────────────────────
+    switch (estadoSistema)
     {
-        const char *mensaje = estadoActual ? mensajeEncendido : mensajeApagado;
-        ServicioActuadoresAPI::registrarEvento("ACTUADOR", nombreActuador, mensaje, "info");
-        estadoPrevio = estadoActual;
+    case EstadoSistema::INIT:
+      if (ciclosTarea > 10)
+      {
+        estadoSistema = EstadoSistema::CALIBRATION;
+        Serial.println("\n[FSM Global] INIT → CALIBRATION");
+      }
+      break;
+
+    case EstadoSistema::CALIBRATION:
+      if (ciclosTarea > 100)
+      {
+        estadoSistema = EstadoSistema::MONITORING;
+        Serial.println("[FSM Global] CALIBRATION → MONITORING");
+      }
+      break;
+
+    case EstadoSistema::MONITORING:
+      break;
+
+    case EstadoSistema::ACTUATION:
+      break;
+
+    case EstadoSistema::ERROR:
+      // Solo ejecuta y loguea una vez por transición para no inundar el puerto serial
+      if (ultimoEstadoImpreso != EstadoSistema::ERROR)
+      {
+        Serial.println("\n❌ [FAIL-SAFE] Activado: K1-K3 OFF, K4 ON (Emergencia)");
+        gestorActuadores.failSafe();
+        controlServo.cerrarEmergencia();
+        alimentador.detener();
+        persiana.detener();
+        ultimoEstadoImpreso = EstadoSistema::ERROR;
+      }
+      break;
+
+    case EstadoSistema::SHUTDOWN:
+      gestorActuadores.failSafe();
+      alimentador.setHabilitado(false);
+      persiana.setHabilitado(false);
+      vTaskDelay(pdMS_TO_TICKS(1000));
+      break;
+
+    default:
+      estadoSistema = EstadoSistema::MONITORING;
     }
+
+    if (estadoSistema != EstadoSistema::ERROR)
+    {
+      ultimoEstadoImpreso = estadoSistema;
+    }
+
+    // ─── Lectura Periódica de Sensores ───────────────────
+    if (ahora - ultimaLecturaSensores >= INTERVALO_SENSORES)
+    {
+      ultimaLecturaSensores = ahora;
+
+      LecturaDHT lecturaDHT = sensorDHT.leer();
+      LecturaMQ135 lecturaMQ135 = sensorMQ135.leer();
+      LecturaKY032 lecturaKY032 = sensorKY032.leer();
+      LecturaUltrasonico lecturaUltrasonico = sensorUltrasonico.leer();
+      LecturaPeso lecturaPeso = sensorPeso.leer();
+
+      float temperatura = lecturaDHT.valida ? lecturaDHT.temperatura : 0.0f;
+      float humedad = lecturaDHT.valida ? lecturaDHT.humedad : 0.0f;
+      int rawNH3 = lecturaMQ135.rawValue;
+
+      // ─── Actualizar Actuadores y FSMs Locales ────────────
+      if (estadoSistema == EstadoSistema::MONITORING)
+      {
+        gestorActuadores.actualizar(
+            temperatura,
+            humedad,
+            rawNH3,
+            lecturaUltrasonico.distancia,
+            lecturaUltrasonico.estado,
+            sensorDHT.enError(),
+            sensorUltrasonico.enError());
+
+        controlServo.actualizar(lecturaKY032.presencia);
+        alimentador.actualizar();
+        persiana.actualizar();
+      }
+
+      // ─── Evaluación de Fallos Críticos ───────────────────
+      bool errorCritico = sensorDHT.enError() || sensorUltrasonico.enError();
+
+      if (errorCritico)
+      {
+        erroresGlobales++;
+        if (estadoSistema != EstadoSistema::ERROR)
+        {
+          estadoSistema = EstadoSistema::ERROR;
+          LOG_ERROR("Fallo persistente en sensores — Transición a ERROR.");
+        }
+      }
+      else if (estadoSistema == EstadoSistema::ERROR)
+      {
+        // Auto-recuperación cuando los sensores vuelven a responder
+        estadoSistema = EstadoSistema::MONITORING;
+        Serial.println("\n✓ [FSM Global] Sensores restablecidos: ERROR → MONITORING");
+      }
+
+      // ─── Alerta de Tolva ─────────────────────────────────
+      if (lecturaPeso.valida && lecturaPeso.peso < UMBRAL_ALIMENTO_BAJO)
+      {
+        LOG_WARN("Alimento bajo en tolva (< 500g)");
+      }
+    }
+
+    vTaskDelay(pdMS_TO_TICKS(10));
+  }
 }
 
-// ──────────────────────────────────────────────────────────────────────
-// Configuración inicial (setup)
-// ──────────────────────────────────────────────────────────────────────
+// ═══════════════════════════════════════════════════════════
+// ─── TAREA WiFi — Core 1 (FreeRTOS) ───────────────────────
+// ═══════════════════════════════════════════════════════════
+
+void tareaWiFi(void *pvParameters)
+{
+  for (;;)
+  {
+    conexionWiFi.actualizar();
+    vTaskDelay(pdMS_TO_TICKS(1000));
+  }
+}
+
+// ═══════════════════════════════════════════════════════════
+// ─── SETUP ───────────────────────────────────────────────
+// ═══════════════════════════════════════════════════════════
+
 void setup()
 {
-    Serial.begin(115200);
-    Serial.println("\n=== Iniciando AVÍSENS ===");
+  Serial.begin(BAUD_RATE);
+  delay(500);
 
-    // 1. Pantalla primero, para poder mostrar mensajes de progreso
-    pantalla.iniciar();
-    pantalla.mostrarBienvenida();
+  Serial.println("\n================================");
+  Serial.println("GALPÓN INTELIGENTE — v7.0.1");
+  Serial.println("Arquitectura Modular + FreeRTOS");
+  Serial.println("================================");
 
-    // 2. Sensores
-    sensorDHT.iniciar();
-    sensorPeso.iniciar(); // OJO: no debe haber peso sobre la celda aquí
-    sensorKY032.iniciar(KY032_PIN);
-    sensorMQ135.iniciar(MQ135_PIN);
+  // ─── Watchdog Timer ───────────────────────────────────
+  esp_task_wdt_init(WDT_TIMEOUT_S, true);
+  Serial.printf("[WDT] Configurado a %d segundos.\n", WDT_TIMEOUT_S);
 
-    // 3. Actuadores (arrancan siempre apagados, por seguridad)
-    actuadores.iniciar();
+  // ─── Inicialización de Módulos ────────────────────────
+  Serial.println("\n[SETUP] Inicializando sensores...");
+  sensorDHT.begin();
+  sensorMQ135.begin();
+  sensorKY032.begin();
+  sensorUltrasonico.begin();
+  sensorPeso.begin();
 
-    // 4. WiFi (con timeout de 15 segundos, no se bloquea para siempre)
-    ConexionWiFi::conectar();
+  Serial.println("[SETUP] Inicializando actuadores...");
+  gestorActuadores.begin();
+  controlServo.begin();
+  alimentador.begin();
+  persiana.begin();
 
-    // 5. Inicializar el gestor de tokens y los servicios de la API
-    tokenManager.iniciar();
-    ServicioAPI::iniciar(&tokenManager);
-    ServicioActuadoresAPI::iniciar(&tokenManager);
+  Serial.println("[SETUP] Iniciando enlace WiFi asíncrono...");
+  conexionWiFi.comenzar();
 
-    Serial.println("=== Sistema listo ===\n");
+  // ─── Tareas FreeRTOS en Cores Independientes ──────────
+  Serial.println("[SETUP] Desplegando tarea de control en Core 0...");
+  xTaskCreatePinnedToCore(
+      tareaGalpon,
+      "tareaGalpon",
+      16384,
+      NULL,
+      2,
+      NULL,
+      0);
 
-    // ────────────────────────────────────────────────────────────────
-    // NOTA IMPORTANTE sobre el KY-032:
-    // El pin "HABILITAR" (ENABLE) del módulo debe estar conectado a
-    // VCC (5V o 3.3V) para que el sensor esté siempre activo.
-    //
-    // NOTA DE SEGURIDAD sobre los relés:
-    // El ESP32 solo controla la BOBINA de cada relé (bajo voltaje).
-    // La carga real (bombillo, extractor, etc.) va del lado de alto
-    // voltaje del relé, completamente aislado del ESP32.
-    // ────────────────────────────────────────────────────────────────
+  Serial.println("[SETUP] Desplegando tarea WiFi en Core 1...");
+  xTaskCreatePinnedToCore(
+      tareaWiFi,
+      "tareaWiFi",
+      4096,
+      NULL,
+      1,
+      NULL,
+      1);
+
+  // ─── Calibración Inicial HX711 ─────────────────────────
+  Serial.println("\n[SETUP] Esperando calibración HX711 (15s timeout)...");
+  Serial.println("Envía 'TARA' por el monitor Serial para calibrar.");
+
+  unsigned long tiempoCalib = millis();
+  bool taraEjecutada = false;
+
+  while ((millis() - tiempoCalib) < 15000)
+  {
+    if (Serial.available())
+    {
+      String cmd = Serial.readStringUntil('\n');
+      cmd.trim();
+      cmd.toUpperCase();
+
+      if (cmd == "TARA")
+      {
+        Serial.println("⏳ Ejecutando tara del HX711...");
+        sensorPeso.setFactor(HX711_FACTOR_ESCALA);
+        sensorPeso.tara();
+        taraEjecutada = true;
+        Serial.println("✓ Tara completada.");
+        break;
+      }
+    }
+    delay(100);
+  }
+
+  if (!taraEjecutada)
+  {
+    LOG_WARN("Calibración omitida — Usando factor por defecto.");
+    sensorPeso.setFactor(HX711_FACTOR_ESCALA);
+  }
+
+  estadoSistema = EstadoSistema::MONITORING;
+  Serial.println("[SETUP] Sistema listo y en modo MONITORING ✓\n");
 }
 
-// ──────────────────────────────────────────────────────────────────────
-// Bucle principal (loop)
-// ──────────────────────────────────────────────────────────────────────
+// ═══════════════════════════════════════════════════════════
+// ─── LOOP PRINCIPAL ───────────────────────────────────────
+// ═══════════════════════════════════════════════════════════
+
 void loop()
 {
-    unsigned long ahora = millis();
-
-    // ────────────────────────────────────────────────────────────────
-    // TAREA 1: Leer sensores y EVALUAR actuadores en el mismo ciclo.
-    // Los actuadores se evalúan justo después de leer, porque la
-    // decisión automática depende de tener los datos más recientes.
-    // ────────────────────────────────────────────────────────────────
-    if (ahora - ultimaLecturaSensores >= INTERVALO_LECTURA_SENSORES)
-    {
-        ultimaLecturaSensores = ahora;
-
-        // --- Leer DHT11 ---
-        LecturaDHT lecturaDHT = sensorDHT.leer();
-        if (lecturaDHT.valida)
-        {
-            ultimaTemperatura = lecturaDHT.temperatura;
-            ultimaHumedad = lecturaDHT.humedad;
-        }
-        else
-        {
-            // Sensor falló: lo registramos como evento para que quede
-            // en el historial y las apps puedan alertar al usuario.
-            ServicioActuadoresAPI::registrarEvento(
-                "FALLA_SENSOR", "DHT11",
-                "Lectura fallida del sensor de temperatura/humedad", "alerta");
-        }
-
-        // --- Leer celda de carga ---
-        ultimoPeso = sensorPeso.leerPeso();
-
-        // --- Leer KY-032 (detector de obstáculos) ---
-        obstaculoDetectado = sensorKY032.detectaObstaculo();
-
-        // --- Leer MQ-135 (calidad del aire) ---
-        calidadAireValor = sensorMQ135.leerValorCrudo();
-        calidadAireVoltaje = sensorMQ135.leerVoltaje();
-
-        Serial.printf("Temp: %.1f C | Hum: %.1f %% | Peso: %.1f g | Obs: %s | Aire: %d (%0.2fV)\n",
-                      ultimaTemperatura, ultimaHumedad, ultimoPeso,
-                      obstaculoDetectado ? "SI" : "NO", calidadAireValor, calidadAireVoltaje);
-
-        // --- EVALUAR ACTUADORES con las lecturas que acabamos de tomar ---
-        LecturasActuales lecturas;
-        lecturas.temperatura = ultimaTemperatura;
-        lecturas.humedad = ultimaHumedad;
-        lecturas.calidadAire = calidadAireValor;
-        lecturas.pesoPlato = ultimoPeso;
-
-        actuadores.evaluar(lecturas);
-
-        // --- Generar eventos solo si algún actuador CAMBIÓ de estado ---
-        registrarSiCambio("calefactor", actuadores.calefactor().estaEncendido(), estadoPrevioCalefactor,
-                          "Calefactor activado: temperatura por debajo del umbral",
-                          "Calefactor desactivado: temperatura normalizada");
-
-        registrarSiCambio("extractor", actuadores.extractor().estaEncendido(), estadoPrevioExtractor,
-                          "Extractor activado: temperatura alta o calidad de aire baja",
-                          "Extractor desactivado: condiciones normalizadas");
-
-        registrarSiCambio("humidificador", actuadores.humidificador().estaEncendido(), estadoPrevioHumidificador,
-                          "Humidificador activado: humedad por debajo del umbral",
-                          "Humidificador desactivado: humedad normalizada");
-    }
-
-    // ────────────────────────────────────────────────────────────────
-    // TAREA 2: Refrescar la pantalla OLED
-    // ────────────────────────────────────────────────────────────────
-    if (ahora - ultimoRefrescoPantalla >= INTERVALO_REFRESCO_PANTALLA)
-    {
-        ultimoRefrescoPantalla = ahora;
-
-        pantalla.mostrarDatos(
-            ultimaTemperatura, ultimaHumedad, ultimoPeso,
-            ConexionWiFi::estaConectado(), obstaculoDetectado, calidadAireValor);
-    }
-
-    // ────────────────────────────────────────────────────────────────
-    // TAREA 3: Enviar lecturas de sensores a la API (FastAPI)
-    // ────────────────────────────────────────────────────────────────
-    if (ahora - ultimoEnvioAPI >= INTERVALO_ENVIO_FIREBASE) // mantenemos mismo intervalo
-    {
-        ultimoEnvioAPI = ahora;
-
-        ServicioAPI::enviarLecturaCompleta(
-            ultimaTemperatura, ultimaHumedad, ultimoPeso,
-            obstaculoDetectado, calidadAireValor, calidadAireVoltaje);
-
-        // Reportamos también el estado de los actuadores en el mismo
-        // intervalo, para que las apps siempre vean ambos sincronizados.
-        ServicioActuadoresAPI::reportarEstadoActuadores(actuadores);
-    }
-
-    // ────────────────────────────────────────────────────────────────
-    // TAREA 4: Sincronizar órdenes MANUALES desde la API (BAJAR datos)
-    // Esta es la única tarea que hace GET en vez de PUT/POST -- es
-    // cómo el ESP32 se entera si una app cambió el modo a MANUAL o
-    // envió una orden de encendido/apagado.
-    // ────────────────────────────────────────────────────────────────
-    if (ahora - ultimaSincronizacionRemota >= INTERVALO_SINCRONIZACION_REMOTA)
-    {
-        ultimaSincronizacionRemota = ahora;
-
-        ComandoRemoto comandos[4];
-        int cantidad = 0;
-        if (ServicioActuadoresAPI::leerComandosPendientes(comandos, 4, cantidad))
-        {
-            for (int i = 0; i < cantidad; i++)
-            {
-                if (!comandos[i].valido)
-                    continue;
-
-                // Aplicar comando según el nombre
-                if (comandos[i].nombre == "calefactor")
-                {
-                    actuadores.establecerModoCalefactor(
-                        comandos[i].modo == "MANUAL" ? ModoActuador::MANUAL : ModoActuador::AUTO);
-                    if (comandos[i].modo == "MANUAL")
-                    {
-                        actuadores.ordenManualCalefactor(comandos[i].ordenManual);
-                    }
-                }
-                else if (comandos[i].nombre == "extractor")
-                {
-                    actuadores.establecerModoExtractor(
-                        comandos[i].modo == "MANUAL" ? ModoActuador::MANUAL : ModoActuador::AUTO);
-                    if (comandos[i].modo == "MANUAL")
-                    {
-                        actuadores.ordenManualExtractor(comandos[i].ordenManual);
-                    }
-                }
-                else if (comandos[i].nombre == "humidificador")
-                {
-                    actuadores.establecerModoHumidificador(
-                        comandos[i].modo == "MANUAL" ? ModoActuador::MANUAL : ModoActuador::AUTO);
-                    if (comandos[i].modo == "MANUAL")
-                    {
-                        actuadores.ordenManualHumidificador(comandos[i].ordenManual);
-                    }
-                }
-                else if (comandos[i].nombre == "alimentador")
-                {
-                    if (comandos[i].ordenManual)
-                    {
-                        actuadores.solicitarDosisManualAlimentador();
-                    }
-                }
-
-                // Confirmar que ejecutamos el comando
-                ServicioActuadoresAPI::confirmarComandoEjecutado(comandos[i].id);
-            }
-        }
-    }
-
-    // Nota: NO se usa delay() en el loop principal. Usar millis() de esta
-    // forma permite que las tareas corran "en paralelo" sin bloquearse
-    // entre sí.
+  vTaskDelay(pdMS_TO_TICKS(1000));
 }

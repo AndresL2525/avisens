@@ -1,34 +1,53 @@
 #include "SensorMQ135.h"
 
-void SensorMQ135::iniciar(int pinADC)
-{
-    _pinADC = pinADC;
-    // El pin ADC no necesita configurarse como INPUT, pero lo dejamos claro
-    pinMode(_pinADC, INPUT);
-    Serial.println("[MQ135] Sensor de calidad del aire inicializado.");
-    Serial.println("[MQ135] NOTA: El sensor necesita precalentamiento de 24h.");
+SensorMQ135::SensorMQ135()
+    : ultimoIntento_(0) {
+  ultimaLectura_ = {0, 0.0f, false, 0};
 }
 
-int SensorMQ135::leerValorCrudo()
-{
-    return analogRead(_pinADC); // 0-4095
+void SensorMQ135::begin() {
+  pinMode(MQ135_PIN, INPUT);
+  LOG_DEBUG("SensorMQ135 inicializado");
 }
 
-float SensorMQ135::leerVoltaje()
-{
-    // 3.3V es el voltaje de referencia del ESP32
-    return (analogRead(_pinADC) / 4095.0) * 3.3;
+LecturaMQ135 SensorMQ135::leer() {
+  unsigned long ahora = millis();
+
+  int rawValue = analogRead(MQ135_PIN);
+  float voltaje = rawValue * (3.3f / 4095.0f);
+
+  // Aplicar filtro de media móvil
+  int rawFiltrado = filtroRaw_.add(rawValue);
+
+  LecturaMQ135 lectura;
+  lectura.rawValue = rawFiltrado;
+  lectura.voltaje = rawFiltrado * (3.3f / 4095.0f);
+  lectura.valida = true;
+  lectura.timestamp = ahora;
+
+  ultimaLectura_ = lectura;
+  return lectura;
 }
 
-float SensorMQ135::leerPPM()
-{
-    // Esta es una fórmula genérica. REQUIERE CALIBRACIÓN con gas conocido.
-    // Devuelve un valor aproximado en ppm (partes por millón)
-    // Para el MQ-135, la relación es: ppm = 10^((Vout - Vref) / pendiente)
-    // Como no tenemos calibración, devolvemos el voltaje como indicador.
-    float voltaje = leerVoltaje();
-    // Fórmula empírica para amoniaco (NH3) – solo referencia
-    // ppm = 10^((voltaje * 3.3 - 0.2) / 0.15)   (ejemplo, no usar en producción)
-    // Retornamos el voltaje para que el usuario pueda monitorear cambios.
-    return voltaje * 100; // Escala ficticia para ver variaciones
+LecturaMQ135 SensorMQ135::getUltimaLectura() const {
+  return ultimaLectura_;
+}
+
+String SensorMQ135::getNivelGas() const {
+  return clasificarNivel(ultimaLectura_.rawValue);
+}
+
+void SensorMQ135::reset() {
+  filtroRaw_.reset();
+  ultimaLectura_ = {0, 0.0f, false, 0};
+}
+
+String SensorMQ135::clasificarNivel(int rawValue) const {
+  if (rawValue < NH3_MODERADO) {
+    return "NORMAL";
+  } else if (rawValue < NH3_ALTO) {
+    return "MODERADO";
+  } else {
+    return "ALTO";
+  }
 }

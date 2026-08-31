@@ -2,24 +2,57 @@
 #define SENSOR_MQ135_H
 
 #include <Arduino.h>
+#include "config.h"
+#include "MovingAverage.h"
 
-class SensorMQ135
-{
-public:
-    // Inicializa el pin analógico
-    void iniciar(int pinADC);
+/**
+ * @class SensorMQ135
+ * @brief Gestor del sensor MQ135 (NH3/CO2) con filtro de media móvil.
+ * 
+ * Realiza lectura analógica del MQ135 y aplica un filtro de media móvil
+ * con buffer circular de MOVING_AVG_SIZE muestras para suavizar ruido.
+ */
+class SensorMQ135 {
+ public:
+  /**
+   * @brief Constructor. Inicializa filtro de media móvil.
+   */
+  SensorMQ135();
 
-    // Lee el valor crudo del ADC (0-4095)
-    int leerValorCrudo();
+  /**
+   * @brief Inicializa el sensor (configurar pin ADC).
+   */
+  void begin();
 
-    // Convierte el valor crudo a voltaje (0-3.3V)
-    float leerVoltaje();
+  /**
+   * @brief Realiza lectura no bloqueante y aplica filtro.
+   * @return Estructura LecturaMQ135 con raw value, voltaje y validez
+   */
+  LecturaMQ135 leer();
 
-    // (Opcional) Devuelve una estimación de ppm (requiere calibración)
-    float leerPPM();
+  /**
+   * @brief Obtiene la última lectura filtrada.
+   * @return Estructura LecturaMQ135
+   */
+  LecturaMQ135 getUltimaLectura() const;
 
-private:
-    int _pinADC;
+  /**
+   * @brief Obtiene clasificación de nivel de gas.
+   * @return "NORMAL", "MODERADO" o "ALTO"
+   */
+  String getNivelGas() const;
+
+  /**
+   * @brief Reinicia el filtro de media móvil.
+   */
+  void reset();
+
+ private:
+  MovingAverage<int, MOVING_AVG_SIZE> filtroRaw_;
+  LecturaMQ135 ultimaLectura_;
+  unsigned long ultimoIntento_;
+
+  String clasificarNivel(int rawValue) const;
 };
 
-#endif
+#endif // SENSOR_MQ135_H
