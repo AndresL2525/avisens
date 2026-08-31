@@ -1,17 +1,8 @@
- Entendido, te lo muestro directamente aquí. Puedes copiarlo y pegarlo en un archivo `.md` (Markdown). Es largo, así que lo presento completo
 
----
 
 # Documento de Diseño del Sistema (SSD)
 # AVÍSENS — Sistema IoT para Granjas Avícolas
 
----
-
-**Versión:** 1.0  
-**Fecha:** 30 de Agosto de 2026  
-**Autor:** Equipo AVÍSENS — SENA ADSO, Ficha 3229446  
-**Clasificación:** Documento Técnico / Proyecto Académico  
-**TRL:** 5 (Technology Readiness Level)
 
 ---
 
@@ -103,8 +94,9 @@ AVÍSENS es un sistema integrado compuesto por tres capas principales:
 | F-06 | Telemetría en la nube | Envío de lecturas de sensores al backend cada 5 segundos | ESP32 + Backend |
 | F-07 | Consulta histórica | Apps consultan lecturas pasadas, estadísticas y eventos | Backend + App |
 | F-08 | Control remoto | Apps envían comandos manuales a actuadores | Backend + ESP32 |
-| F-09 | Alertas y eventos | Registro de fallas, alarmas y cambios de estado | Backend + ESP32 |
+| **F-09** | **Alertas de Fallo y Datos Anómalos** | Detección inmediata de sensores desconectados, fallos continuos de lectura ($N \ge 3$) y valores fuera de límites físicos plausibles (outliers). Notificación automática como evento crítico al backend. | ESP32 + Backend |
 | F-10 | Autenticación dual | Tokens JWT separados para dispositivos y usuarios | Backend |
+| **F-11** | **Detección de Dispositivo Offline (Heartbeat/Watchdog en Nube)** | Monitoreo pasivo en el backend que genera una alerta de desconexión si un galpón no emite lecturas de telemetría en más de 30 segundos consecutivos. | Backend |
 
 ### 2.3 Características de los Usuarios
 
@@ -379,6 +371,14 @@ El endpoint `POST /sensors/readings` compara el `device_id` del token JWT con el
 | `report_actuator_state(state)` | ESP32 reporta estado real |
 | `get_actuator_state(device_id, nombre)` | App consulta estado actual |
 
+#### 4.5.4 AlertService (Detección de Inactividad y Anomalías)
+
+| Método | Descripción | Criterio de Disparo |
+|:---|:---|:---|
+| `check_sensor_outliers(reading)` | Evalúa si las métricas recibidas violan gradientes térmicos abruptos (ej. $\Delta T > 10^\circ\text{C}$ en 5 s) o incoherencias físicas. | Genera registro `POST /events` nivel `alerta` |
+| `evaluate_device_heartbeat(device_id)` | Tarea en background / cron que verifica `timestamp` de la última lectura en `sensor_readings`. | Dispara alerta `critico` si `now - last_seen > 30s` |
+| `dispatch_critical_notification(event)` | Envía notificación push / webhook inmediato a los administradores ante eventos de falla. | Nivel `alerta` o `critico` |
+
 ### 4.6 Middleware
 
 | Middleware | Función |
@@ -609,27 +609,37 @@ Ciclo con deadlock: WDT cuenta 1s...2s...10s → TIMEOUT
 
 **Principio clave:** `vTaskDelay()` en lugar de `delay()` bloqueante para permitir yield al scheduler.
 
-### 5.8 Fail-Safe
+### 5.8 Detección de Errores y Diagnóstico de Sensores
 
-**Condiciones de activación:**
-- 3 fallos consecutivos en DHT22
-- 3 fallos consecutivos en HC-SR04
-- Cualquier error crítico detectado
+El firmware clasifica los errores de sensado en tres categorías antes de reportar la alerta:
 
-**Acciones en fail-safe:**
-```cpp
-void failSafe() {
-    k1_.desactivar();      // Calefacción OFF (evita sobrecalentamiento)
-    k2_.desactivar();      // Ventilador OFF
-    k3_.desactivar();      // Extractor OFF
-    k4_.activar();         // Bomba ON (drenaje emergencia)
-    controlServo.cerrarEmergencia();  // Cierra puerta
-    alimentador.detener();            // Detiene alimentador
-    persiana.detener();               // Detiene persiana
+1. **Fallo de Bus / Sin Respuesta (Hardware Error):**  
+   Ocurre si el sensor no responde a los pulsos de inicio (ej. DHT22 timeout $\approx 2.25\text{ ms}$, HC-SR04 ECHO $> 30\text{ ms}$). Si se acumulan 3 fallos consecutivos, se marca `enError = true` y se despacha un payload al endpoint `/events`.
+2. **Lectura Fuera de Rango Físico (Out of Range):**  
+   Valores como temperatura $< -10^\circ\text{C}$ o $> 60^\circ\text{C}$, humedad $= 0\%$ o $100\%$ sostenida, o distancias $< 0.5\text{ cm}$ o $> 400\text{ cm}$. El dato se descarta del cálculo de lazos de control y se envía con bandera de advertencia.
+3. **Picos de Ruido / Gradiente Excesivo:**  
+   El filtro de media móvil circular (10 muestras) descarta lecturas cuyo delta supere 3 desviaciones estándar de la ventana actual.
+
+### 5.9 Flujo de Envío de Alerta desde ESP32
+
+Cuando el firmware detecta la falla:
+1. Conmuta la máquina de estado global a `S3: ERROR` (Fail-Safe local).
+2. Construye un mensaje de evento en formato JSON.
+3. Emite una petición `POST /events` de alta prioridad en Core 1:
+
+```json
+{
+  "device_id": "galpon_01",
+  "tipo": "FALLA_SENSOR",
+  "origen": "SensorDHT",
+  "mensaje": "DHT22 desconectado o sin respuesta (3 timeouts seguidos)",
+  "nivel": "critico",
+  "metadata": {
+    "fallos_consecutivos": 3,
+    "ultimo_valor_valido": { "temperatura": 25.1, "humedad": 61.4 }
+  }
 }
 ```
-
-**Auto-recuperación:** Cuando los sensores vuelven a responder, el sistema transita automáticamente de ERROR → MONITORING.
 
 ---
 
@@ -803,28 +813,41 @@ db.sensor_readings.aggregate([
 ### 8.2 Flujo de Comunicación ESP32 ↔ Backend
 
 ```
-ESP32                                          Backend
-  │                                              │
-  │── POST /auth/device/login ──────────────────→│
-  │←── { access_token: "eyJ...", token_type: "bearer" }──│
-  │                                              │
-  │  [Cada 5 segundos]                           │
-  │── POST /sensors/readings + Bearer token ────→│
-  │   { device_id, temperatura, humedad, ... }   │
-  │←── { success: true, id: "..." }──────────────│
-  │                                              │
-  │  [Cada 10 segundos]                          │
-  │── GET /actuators/commands + Bearer token ───→│
-  │←── [ { _id, nombre, modo, orden_manual } ]──│
-  │                                              │
-  │  [Después de ejecutar comando]               │
-  │── POST /actuators/commands/{id}/executed ───→│
-  │←── { success: true }─────────────────────────│
-  │                                              │
-  │  [Después de cambiar estado actuador]        │
-  │── POST /actuators/state + Bearer token ─────→│
-  │   { device_id, nombre, estado, modo }        │
-  │←── { success: true }─────────────────────────│
+ESP32 (Core 0 / Core 1)                         Backend (FastAPI)
+│                                                     │
+│── POST /auth/device/login ─────────────────────────→│
+│←── { access_token: "eyJ...", token_type: "bearer" }─│
+│                                                     │
+│  [Cada 5 segundos]                                  │
+│── POST /sensors/readings + Bearer token ───────────→│
+│   { device_id, temperatura, humedad, ... }          │
+│←── { success: true, id: "..." }────────────────────│
+│                                                     │
+│  [Si sensor falla x3 consecutivos]                  │
+│── POST /events (Device JWT) ───────────────────────→│
+│   { tipo: "FALLA_SENSOR", nivel: "critico" }        │
+│←── HTTP 201 Created ────────────────────────────────│
+│                                                     │
+│                                          [Evalúa regla de alerta]
+│                                          [Notifica a App / Admin]
+│                                                     │
+│                                                     ▼
+│                                                App Móvil
+│                                                     │
+│←── Push Notification / Polling GET /events ─────────│
+│                                                     │
+│  [Cada 10 segundos]                                 │
+│── GET /actuators/commands + Bearer token ──────────→│
+│←── [ { _id, nombre, modo, orden_manual } ]─────────│
+│                                                     │
+│  [Después de ejecutar comando]                      │
+│── POST /actuators/commands/{id}/executed ─────────→│
+│←── { success: true }────────────────────────────────│
+│                                                     │
+│  [Después de cambiar estado actuador]               │
+│── POST /actuators/state + Bearer token ───────────→│
+│   { device_id, nombre, estado, modo }               │
+│←── { success: true }────────────────────────────────│
 ```
 
 ---
@@ -1039,20 +1062,4 @@ galpon/{device_id}/system/heartbeat
 
 ---
 
-**Fin del Documento**
 
-*AVÍSENS Team — SENA ADSO, Ficha 3229446*  
-*Centro de Teleinformática y Producción Industrial, Regional Cauca*  
-*Universidad del Cauca*
-
----
-
-**Historial de Revisiones**
-
-| Versión | Fecha | Autor | Descripción |
-|---------|-------|-------|-------------|
-| 1.0 | 2026-08-30 | Equipo AVÍSENS | Documento inicial SSD completo |
-
----
-
-**Copia todo el texto de arriba, pégalo en un archivo de texto y guárdalo con extensión `.md` (por ejemplo: `SSD_AVISENS.md`). Lo puedes abrir con cualquier editor Markdown (VS Code, Typora, Notion, etc.) o convertirlo a PDF si lo necesitas.**
