@@ -1,12 +1,13 @@
 """
 =============================================================================
-Router de sensores.
+Router de sensores (MODIFICADO para integrar AlertService).
 
 Endpoints:
-  POST /sensors/readings      → ESP32 envía lecturas (protegido con device token)
-  GET  /sensors/readings      → Apps consultan últimas lecturas (protegido con user token)
+  POST /sensors/readings      → ESP32 envía lecturas + detección de anomalías
+  GET  /sensors/readings      → Apps consultan últimas lecturas
   GET  /sensors/readings/history → Historial por rango de tiempo
   GET  /sensors/stats         → Estadísticas agregadas
+  GET  /sensors/health/{device_id} → Estado de salud del dispositivo
 =============================================================================
 """
 
@@ -14,6 +15,7 @@ from fastapi import APIRouter, Depends, Query, status
 from typing import List, Optional
 from app.models.sensor import SensorReadingCreate, SensorReadingResponse, SensorStats
 from app.services.sensor_service import SensorService
+from app.services.alert_service import AlertService
 from app.services.auth_service import get_current_device, get_current_user
 from app.database import get_database
 from app.utils.logger import get_logger
@@ -26,25 +28,36 @@ def get_sensor_service(db=Depends(get_database)) -> SensorService:
     return SensorService(db)
 
 
+def get_alert_service(db=Depends(get_database)) -> AlertService:
+    return AlertService(db)
+
+
 @router.post(
     "/readings",
     response_model=dict,
     status_code=status.HTTP_201_CREATED,
     summary="Recibir lectura de sensores (ESP32)",
-    description="El ESP32 envía los datos de los sensores cada 5 segundos."
+    description="El ESP32 envía los datos de los sensores cada 5 segundos. Se verifica anomalías automáticamente."
 )
 async def create_sensor_reading(
     reading: SensorReadingCreate,
     device_id: str = Depends(get_current_device),
-    service: SensorService = Depends(get_sensor_service)
+    sensor_service: SensorService = Depends(get_sensor_service),
+    alert_service: AlertService = Depends(get_alert_service)
 ):
-    """Recibe y almacena una lectura de sensores del ESP32.
+    """
+    Recibe, almacena y valida una lectura de sensores del ESP32.
 
     El token JWT del dispositivo se valida automáticamente.
     Si el device_id del token no coincide con el del body, se rechaza
     (medida de seguridad contra spoofing).
+
+    Adicionalmente, se ejecuta detección asíncrona de anomalías:
+    - Gradientes térmicos abruptos
+    - Valores fuera de rango físico
+    - Humedad estancada en extremos
     """
-    # Seguridad: el token dice quién es el dispositivo. No confiamos ciegamente en el body.
+    # ─── Seguridad: Validar que el device_id coincida con el token ──
     if reading.device_id != device_id:
         logger.warning(
             "Spoofing detectado: device_id del body no coincide con el token",
@@ -53,13 +66,25 @@ async def create_sensor_reading(
         )
         reading.device_id = device_id  # Sobrescribimos con el valor autenticado
 
-    reading_id = await service.create_reading(reading)
+    # ─── 1. Almacenar la lectura ─────────────────────────────────────
+    reading_id = await sensor_service.create_reading(reading)
+
+    # ─── 2. Ejecutar detección de anomalías (asíncrona, no bloqueante) ──
+    anomaly_event_id = await alert_service.check_sensor_outliers(
+        device_id=device_id,
+        temperatura=reading.temperatura,
+        humedad=reading.humedad,
+        calidad_aire=reading.calidad_aire if hasattr(reading, 'calidad_aire') else 0,
+        timestamp=reading.timestamp if reading.timestamp else __import__('datetime').datetime.now(__import__('datetime').timezone.utc)
+    )
 
     return {
         "success": True,
         "id": reading_id,
         "device_id": device_id,
-        "message": "Lectura almacenada correctamente"
+        "message": "Lectura almacenada correctamente",
+        "anomaly_detected": anomaly_event_id is not None,
+        "anomaly_event_id": anomaly_event_id
     }
 
 
@@ -115,3 +140,26 @@ async def get_sensor_stats(
 ):
     """Estadísticas agregadas usando el pipeline de MongoDB."""
     return await service.get_stats(device_id=device_id, hours=hours)
+
+
+@router.get(
+    "/health/{device_id}",
+    response_model=dict,
+    summary="Estado de salud del dispositivo",
+    description="Consulta conectividad, última lectura y eventos críticos recientes."
+)
+async def get_device_health(
+    device_id: str,
+    user_id: str = Depends(get_current_user),
+    alert_service: AlertService = Depends(get_alert_service)
+):
+    """
+    Devuelve información de salud del dispositivo:
+    - is_online: Conectado en los últimos 30s
+    - last_reading_timestamp: Cuándo fue la última lectura
+    - inactividad_segundos: Segundos desde la última lectura
+    - critical_events_1h: Cantidad de eventos críticos en la última hora
+    - recent_events: Lista de eventos recientes
+    """
+    logger.info("Consulta de health status", user=user_id, device=device_id)
+    return await alert_service.get_device_health_status(device_id)

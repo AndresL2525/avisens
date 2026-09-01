@@ -1,6 +1,6 @@
 """
 =============================================================================
-AVÍSENS Backend - Punto de entrada principal.
+AVÍSENS Backend - Punto de entrada principal (MODIFICADO con AlertService).
 
 FastAPI application con:
 - Conexión async a MongoDB (Motor)
@@ -10,20 +10,23 @@ FastAPI application con:
 - Logging estructurado
 - Manejo global de excepciones
 - Documentación OpenAPI automática
+- Background task para heartbeat de dispositivos (AlertService)
 
 Flujo de datos:
   ESP32 ──POST /sensors/readings──→ FastAPI ──→ MongoDB Atlas
   ESP32 ──GET  /actuators/commands──→ FastAPI ←── MongoDB
   App   ──GET  /sensors/readings──→ FastAPI ←── MongoDB
+  [Background] Heartbeat check cada 30s ──→ Genera alertas de offline
 =============================================================================
 """
 
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 from contextlib import asynccontextmanager
+import asyncio
 
 from app.config import settings
-from app.database import connect_db, close_db
+from app.database import connect_db, close_db, get_database
 from app.utils.logger import configure_logging, get_logger
 from app.utils.exceptions import (
     AVISENSException,
@@ -33,6 +36,7 @@ from app.utils.exceptions import (
 )
 from app.middleware.rate_limit import setup_rate_limiting, limiter
 from app.middleware.security import SecurityHeadersMiddleware
+from app.services.alert_service import AlertService
 
 from app.routers import auth, sensors, actuators, events
 
@@ -40,15 +44,88 @@ from fastapi.exceptions import RequestValidationError
 
 logger = get_logger(__name__)
 
+# Variables globales para control de background tasks
+_heartbeat_task = None
+_heartbeat_running = False
+
+
+async def heartbeat_background_task():
+    """
+    Tarea en background que evalúa el heartbeat de todos los dispositivos
+    cada 30 segundos. Detecta dispositivos inactivos y genera alertas.
+
+    Se ejecuta de forma independiente en paralelo a las requests HTTP.
+    """
+    global _heartbeat_running
+    _heartbeat_running = True
+
+    try:
+        await asyncio.sleep(10)  # Esperar 10s antes de empezar (estabilización)
+        logger.info("✅ Background task de heartbeat iniciada")
+
+        while _heartbeat_running:
+            try:
+                # Obtener instancia de la base de datos
+                db = None
+                try:
+                    # Acceder a la DB a través del cliente global
+                    from app.database import client
+                    if client:
+                        db = client[settings.mongodb_name]
+                        alert_service = AlertService(db)
+
+                        result = await alert_service.evaluate_device_heartbeat(
+                            timeout_seconds=30
+                        )
+
+                        if result.get("offline_devices"):
+                            logger.warning(
+                                f"Heartbeat: Detectados {len(result['offline_devices'])} "
+                                f"dispositivos offline",
+                                offline_count=len(result["offline_devices"]),
+                                alerts_created=result.get("alerts_created", 0),
+                                skipped_alerts=result.get("existing_alerts_skipped", 0)
+                            )
+                        else:
+                            logger.debug(
+                                "Heartbeat: Todos los dispositivos online",
+                                timestamp=result.get("evaluation_time")
+                            )
+                except Exception as inner_e:
+                    logger.error(
+                        "Error en heartbeat task",
+                        error=str(inner_e)
+                    )
+
+                # Esperar 30 segundos antes del próximo chequeo
+                await asyncio.sleep(30)
+
+            except asyncio.CancelledError:
+                logger.info("🛑 Background task de heartbeat cancelada")
+                break
+            except Exception as e:
+                logger.error(
+                    "Error no esperado en heartbeat",
+                    error=str(e)
+                )
+                await asyncio.sleep(30)  # Reintentar después de 30s
+
+    finally:
+        _heartbeat_running = False
+        logger.info("🛑 Background task de heartbeat finalizada")
+
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
-    """Gestiona el ciclo de vida de la aplicación.
-
-    - startup: conecta a MongoDB, configura logging
-    - shutdown: cierra conexiones limpiamente
     """
-    # Startup
+    Gestiona el ciclo de vida de la aplicación.
+
+    - startup: conecta a MongoDB, configura logging, inicia background tasks
+    - shutdown: cierra conexiones limpiamente, detiene background tasks
+    """
+    global _heartbeat_task
+
+    # ─── STARTUP ──────────────────────────────────────────────────────
     configure_logging()
     logger.info("🚀 Iniciando AVÍSENS Backend", environment=settings.environment)
 
@@ -57,14 +134,34 @@ async def lifespan(app: FastAPI):
         logger.info("✅ Base de datos conectada")
     except Exception as e:
         logger.error("❌ Fallo al conectar base de datos", error=str(e))
-        # En producción, podrías querer fallar silenciosamente o usar retry
         raise
+
+    # ─── Iniciar background task de heartbeat ──────────────────────────
+    try:
+        _heartbeat_task = asyncio.create_task(heartbeat_background_task())
+        logger.info("✅ Background task de heartbeat programada")
+    except Exception as e:
+        logger.error("❌ Fallo al iniciar background task", error=str(e))
+        # No lanzar excepción aquí; la app puede seguir sin heartbeat
 
     yield  # La aplicación corre aquí
 
-    # Shutdown
+    # ─── SHUTDOWN ─────────────────────────────────────────────────────
     logger.info("🛑 Cerrando AVÍSENS Backend")
+
+    # Detener background task
+    global _heartbeat_running
+    _heartbeat_running = False
+
+    if _heartbeat_task:
+        _heartbeat_task.cancel()
+        try:
+            await _heartbeat_task
+        except asyncio.CancelledError:
+            pass
+
     await close_db()
+    logger.info("✅ Backend cerrado correctamente")
 
 
 # =============================================================================
@@ -74,7 +171,7 @@ app = FastAPI(
     title="AVÍSENS API",
     description="Backend IoT para monitoreo y automatización de granjas avícolas",
     version="1.0.0",
-    docs_url="/docs" if not settings.is_production else None,  # Desactiva docs en prod
+    docs_url="/docs" if not settings.is_production else None,
     redoc_url="/redoc" if not settings.is_production else None,
     openapi_url="/openapi.json" if not settings.is_production else None,
     lifespan=lifespan,
@@ -120,12 +217,18 @@ app.include_router(events.router)
 # =============================================================================
 @app.get("/health", tags=["Sistema"], summary="Verificar estado del servidor")
 async def health_check():
-    """Endpoint de health check para monitoreo (Docker, Kubernetes, etc.)."""
+    """
+    Endpoint de health check para monitoreo (Docker, Kubernetes, etc.).
+    Incluye información sobre estado de background tasks.
+    """
     return {
         "status": "healthy",
         "service": "avisens-backend",
         "version": "1.0.0",
         "environment": settings.environment,
+        "background_tasks": {
+            "heartbeat": "running" if _heartbeat_running else "stopped"
+        }
     }
 
 
@@ -150,5 +253,5 @@ if __name__ == "__main__":
         host=settings.api_host,
         port=settings.api_port,
         workers=settings.api_workers,
-        reload=not settings.is_production,  # Hot reload solo en dev
+        reload=not settings.is_production,
     )
