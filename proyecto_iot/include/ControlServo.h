@@ -7,17 +7,6 @@
 #include <freertos/task.h>
 #include "config.h"
 
-#ifndef ESTADO_PUERTA_DEFINIDO
-#define ESTADO_PUERTA_DEFINIDO
-enum class EstadoPuerta : uint8_t
-{
-  CERRADA = 0,
-  ABRIENDO,
-  ABIERTA,
-  CERRANDO
-};
-#endif
-
 #ifndef ANGULO_CERRADA
 #define ANGULO_CERRADA 0
 #endif

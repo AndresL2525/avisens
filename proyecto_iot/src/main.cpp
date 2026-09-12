@@ -1,7 +1,7 @@
 /**
  * =============================================================================
  * main.cpp (MODIFICADO)
- * 
+ *
  * Cambios principales:
  * 1. Incluye ServicioAPI para comunicación con backend
  * 2. Sincroniza FSM Global con documento SSD:
@@ -12,14 +12,14 @@
  * 3. En ERROR, envía evento de falla al backend ANTES de pausar
  * 4. En tareaWiFi: envía telemetría cada 5s y consulta comandos cada 10s
  * 5. Detección de gradiente térmico (ΔT > 10°C en 5s)
- * 
+ *
  * =============================================================================
  */
 
 #include <Arduino.h>
 #include <esp_task_wdt.h>
 #include <freertos/task.h>
-#include <queue.h>
+#include <freertos/queue.h>
 
 #include "config.h"
 #include "MovingAverage.h"
@@ -67,8 +67,7 @@ ConexionWiFi conexionWiFi("prueba", "123456789");
 ServicioAPI servicioAPI(
     "http://192.168.1.100:8000",
     "galpon_01",
-    "device_secret_key_123"
-);
+    "device_secret_key_123");
 
 // ─── Variables de sincronización ─────────────────────────
 unsigned long ultimaLecturaSensores = 0;
@@ -78,7 +77,7 @@ unsigned long ultimaConsultaComandos = 0;
 
 // ─── Variables FSM (Documento SSD) ──────────────────────
 uint32_t ciclosArranque = 0;        // Variable C: contador de arranque
-bool calibracionCompletada = false;  // Variable T: tara HX711 completada
+bool calibracionCompletada = false; // Variable T: tara HX711 completada
 uint32_t fallosAcumulados = 0;      // Variable F: contador de fallos >= 3
 bool comandoRearme = false;         // Variable R: rearme manual por serial
 
@@ -87,7 +86,8 @@ uint32_t ciclosTarea = 0;
 uint32_t erroresGlobales = 0;
 
 // ─── Historial de temperatura para detectar gradientes ────
-struct HistorialTemperatura {
+struct HistorialTemperatura
+{
   float temperatura;
   unsigned long timestamp;
 } ultimaTemperatura = {0.0f, 0};
@@ -100,10 +100,11 @@ MovingAverage<float, 10> filtroTemperatura;
 // ═══════════════════════════════════════════════════════════
 
 void enviarEventoFallaAlBackend(
-    const String& origen,
-    const String& mensaje,
-    const String& nivel = "critico") {
-  
+    const String &origen,
+    const String &mensaje,
+    const String &nivel = "critico")
+{
+
   // Construir metadata JSON
   String metadataJson = "";
   {
@@ -113,13 +114,16 @@ void enviarEventoFallaAlBackend(
     metadata["estado_dht"] = sensorDHT.enError();
     metadata["estado_ultrasonico"] = sensorUltrasonico.enError();
     metadata["ciclos_sistema"] = ciclosTarea;
-    
+
     serializeJson(metadata, metadataJson);
   }
 
-  if (!servicioAPI.enviarEventoFalla(origen, mensaje, nivel, metadataJson)) {
+  if (!servicioAPI.enviarEventoFalla(origen, mensaje, nivel, metadataJson))
+  {
     LOG_ERROR("Falló envío de evento crítico al backend");
-  } else {
+  }
+  else
+  {
     LOG_DEBUG("✓ Evento de falla enviado al backend");
   }
 }
@@ -128,11 +132,13 @@ void enviarEventoFallaAlBackend(
 // ─── FUNCIÓN: Detectar gradiente térmico abrupto ─────────
 // ═══════════════════════════════════════════════════════════
 
-bool detectarGradienteTermico(float temperatura, unsigned long ahora) {
-  const float UMBRAL_GRADIENT = 10.0f;  // °C
-  const unsigned long VENTANA_TIEMPO = 5000;  // 5 segundos en ms
+bool detectarGradienteTermico(float temperatura, unsigned long ahora)
+{
+  const float UMBRAL_GRADIENT = 10.0f;       // °C
+  const unsigned long VENTANA_TIEMPO = 5000; // 5 segundos en ms
 
-  if (ultimaTemperatura.timestamp == 0) {
+  if (ultimaTemperatura.timestamp == 0)
+  {
     // Primera lectura
     ultimaTemperatura.temperatura = temperatura;
     ultimaTemperatura.timestamp = ahora;
@@ -142,8 +148,9 @@ bool detectarGradienteTermico(float temperatura, unsigned long ahora) {
   unsigned long deltaT_ms = ahora - ultimaTemperatura.timestamp;
   float deltaTemp = std::abs(temperatura - ultimaTemperatura.temperatura);
 
-  if (deltaT_ms <= VENTANA_TIEMPO && deltaTemp > UMBRAL_GRADIENT) {
-    LOG_WARN("⚠ Gradiente térmico abrupto: ΔT=" + String(deltaTemp) + 
+  if (deltaT_ms <= VENTANA_TIEMPO && deltaTemp > UMBRAL_GRADIENT)
+  {
+    LOG_WARN("⚠ Gradiente térmico abrupto: ΔT=" + String(deltaTemp) +
              "°C en " + String(deltaT_ms) + "ms");
     return true;
   }
@@ -157,29 +164,35 @@ bool detectarGradienteTermico(float temperatura, unsigned long ahora) {
 // ─── TAREA PRINCIPAL — Core 0 (FreeRTOS) ────────────────
 // ═══════════════════════════════════════════════════════════
 
-void tareaGalpon(void *pvParameters) {
+void tareaGalpon(void *pvParameters)
+{
   esp_task_wdt_add(NULL);
   Serial.println("[FreeRTOS] Watchdog Timer registrado en Core 0.");
 
   static EstadoSistema ultimoEstadoImpreso = EstadoSistema::INIT;
 
-  for (;;) {
+  for (;;)
+  {
     unsigned long ahora = millis();
     esp_task_wdt_reset();
     ciclosTarea++;
 
     // ─── Procesamiento de comandos Serial (Variable R) ──────────────
-    if (Serial.available()) {
+    if (Serial.available())
+    {
       String cmd = Serial.readStringUntil('\n');
       cmd.trim();
       cmd.toUpperCase();
 
-      if (cmd == "REARME" || cmd == "RESET") {
+      if (cmd == "REARME" || cmd == "RESET")
+      {
         LOG_WARN("Comando de rearme recibido por Serial");
         comandoRearme = true;
         estadoSistema = EstadoSistema::INIT;
         ciclosArranque = 0;
-      } else if (cmd == "TARA") {
+      }
+      else if (cmd == "TARA")
+      {
         LOG_DEBUG("Comando de tara (HX711) recibido");
         sensorPeso.tara();
         calibracionCompletada = true;
@@ -187,12 +200,14 @@ void tareaGalpon(void *pvParameters) {
     }
 
     // ─── Máquina de Estado Global (Sincronizada con SSD) ──────────────
-    switch (estadoSistema) {
+    switch (estadoSistema)
+    {
     case EstadoSistema::INIT:
       ciclosArranque++;
-      
+
       // Variable C: Transición cuando ciclosArranque >= 10
-      if (ciclosArranque >= 10) {
+      if (ciclosArranque >= 10)
+      {
         estadoSistema = EstadoSistema::CALIBRATION;
         Serial.println("\n[FSM Global] INIT → CALIBRATION (Variable C>=10)");
       }
@@ -201,7 +216,8 @@ void tareaGalpon(void *pvParameters) {
     case EstadoSistema::CALIBRATION:
       // Variable T: Esperar calibración HX711
       // Transición automática después de cierto tiempo o si se completa manualmente
-      if (calibracionCompletada || ciclosTarea > 150) {
+      if (calibracionCompletada || ciclosTarea > 150)
+      {
         estadoSistema = EstadoSistema::MONITORING;
         Serial.println("[FSM Global] CALIBRATION → MONITORING (Variable T=true)");
       }
@@ -218,15 +234,15 @@ void tareaGalpon(void *pvParameters) {
 
     case EstadoSistema::ERROR:
       // Solo ejecuta una vez por transición
-      if (ultimoEstadoImpreso != EstadoSistema::ERROR) {
+      if (ultimoEstadoImpreso != EstadoSistema::ERROR)
+      {
         Serial.println("\n❌ [FAIL-SAFE] Activado: K1-K3 OFF, K4 ON (Emergencia)");
-        
+
         // ─── Enviar evento de falla ANTES de pausar ───────────────────
         enviarEventoFallaAlBackend(
             "SensorsDHT_Ultrasonico",
             "Fallos persistentes en sensores críticos - Sistema en fail-safe",
-            "critico"
-        );
+            "critico");
 
         gestorActuadores.failSafe();
         controlServo.cerrarEmergencia();
@@ -236,7 +252,8 @@ void tareaGalpon(void *pvParameters) {
       }
 
       // ─── Intento de recuperación automática ──────────────────────
-      if (!sensorDHT.enError() && !sensorUltrasonico.enError()) {
+      if (!sensorDHT.enError() && !sensorUltrasonico.enError())
+      {
         LOG_DEBUG("✓ Sensores recuperados - Transición a MONITORING");
         estadoSistema = EstadoSistema::MONITORING;
         fallosAcumulados = 0;
@@ -254,12 +271,14 @@ void tareaGalpon(void *pvParameters) {
       estadoSistema = EstadoSistema::MONITORING;
     }
 
-    if (estadoSistema != EstadoSistema::ERROR) {
+    if (estadoSistema != EstadoSistema::ERROR)
+    {
       ultimoEstadoImpreso = estadoSistema;
     }
 
     // ─── Lectura Periódica de Sensores ───────────────────────────────
-    if (ahora - ultimaLecturaSensores >= INTERVALO_SENSORES) {
+    if (ahora - ultimaLecturaSensores >= INTERVALO_SENSORES)
+    {
       ultimaLecturaSensores = ahora;
 
       LecturaDHT lecturaDHT = sensorDHT.leer();
@@ -273,14 +292,16 @@ void tareaGalpon(void *pvParameters) {
       int rawNH3 = lecturaMQ135.rawValue;
 
       // ─── Detectar gradiente térmico (ΔT > 10°C en 5s) ──────────────
-      if (lecturaDHT.valida) {
+      if (lecturaDHT.valida)
+      {
         bool hayGradiente = detectarGradienteTermico(temperatura, ahora);
-        if (hayGradiente) {
+        if (hayGradiente)
+        {
           // Registrar evento de gradiente
           String metadataJson = "";
           {
             DynamicJsonDocument metadata(256);
-            metadata["delta_temperatura"] = 
+            metadata["delta_temperatura"] =
                 std::abs(temperatura - ultimaTemperatura.temperatura);
             metadata["temperatura_actual"] = temperatura;
             serializeJson(metadata, metadataJson);
@@ -290,7 +311,8 @@ void tareaGalpon(void *pvParameters) {
       }
 
       // ─── Actualizar Actuadores y FSMs Locales ────────────────────
-      if (estadoSistema == EstadoSistema::MONITORING) {
+      if (estadoSistema == EstadoSistema::MONITORING)
+      {
         gestorActuadores.actualizar(
             temperatura,
             humedad,
@@ -308,15 +330,19 @@ void tareaGalpon(void *pvParameters) {
       // ─── Evaluación de Fallos Críticos (Variable F) ────────────────
       bool errorCritico = sensorDHT.enError() || sensorUltrasonico.enError();
 
-      if (errorCritico) {
+      if (errorCritico)
+      {
         fallosAcumulados++;
-        
+
         // Variable F: Si fallos >= 3, transición a ERROR
-        if (fallosAcumulados >= 3 && estadoSistema != EstadoSistema::ERROR) {
+        if (fallosAcumulados >= 3 && estadoSistema != EstadoSistema::ERROR)
+        {
           estadoSistema = EstadoSistema::ERROR;
           LOG_ERROR("Fallos acumulados >= 3 — Transición a ERROR (Variable F)");
         }
-      } else if (estadoSistema == EstadoSistema::ERROR) {
+      }
+      else if (estadoSistema == EstadoSistema::ERROR)
+      {
         // Auto-recuperación cuando los sensores vuelven a responder
         estadoSistema = EstadoSistema::MONITORING;
         fallosAcumulados = 0;
@@ -324,12 +350,14 @@ void tareaGalpon(void *pvParameters) {
       }
 
       // ─── Alerta de Tolva ──────────────────────────────────────────
-      if (lecturaPeso.valida && lecturaPeso.peso < UMBRAL_ALIMENTO_BAJO) {
+      if (lecturaPeso.valida && lecturaPeso.peso < UMBRAL_ALIMENTO_BAJO)
+      {
         LOG_WARN("Alimento bajo en tolva (< 500g)");
       }
 
       // ─── Debug: Mostrar estado actual ─────────────────────────────
-      if (ciclosTarea % 30 == 0) {
+      if (ciclosTarea % 30 == 0)
+      {
         Serial.printf("[Ciclo %lu] T=%.1f°C H=%.0f%% NH3=%d ESTADO=%d\n",
                       ciclosTarea, temperatura, humedad, rawNH3,
                       static_cast<int>(estadoSistema));
@@ -344,68 +372,82 @@ void tareaGalpon(void *pvParameters) {
 // ─── TAREA WiFi — Core 1 (FreeRTOS) ───────────────────────
 // ═══════════════════════════════════════════════════════════
 
-void tareaWiFi(void *pvParameters) {
+void tareaWiFi(void *pvParameters)
+{
   Serial.println("[WiFi Task] Iniciada en Core 1");
-  
+
   // Esperar a que WiFi se conecte
   vTaskDelay(pdMS_TO_TICKS(5000));
 
   bool autenticado = false;
 
-  for (;;) {
+  for (;;)
+  {
     // ─── Mantener conexión WiFi ──────────────────────────────────────
     conexionWiFi.actualizar();
 
-    if (WiFi.isConnected()) {
+    if (WiFi.isConnected())
+    {
       // ─── Autenticar si no está autenticado ────────────────────────
-      if (!autenticado && !servicioAPI.estaAutenticado()) {
+      if (!autenticado && !servicioAPI.estaAutenticado())
+      {
         LOG_DEBUG("Intentando autenticar dispositivo...");
-        if (servicioAPI.autenticarDispositivo()) {
+        if (servicioAPI.autenticarDispositivo())
+        {
           autenticado = true;
           LOG_DEBUG("✓ Dispositivo autenticado");
         }
       }
 
       // ─── Envío de telemetría cada 5 segundos ────────────────────
-      if (autenticado && (millis() - ultimaEnvioTelemetria >= 5000)) {
+      if (autenticado && (millis() - ultimaEnvioTelemetria >= 5000))
+      {
         ultimaEnvioTelemetria = millis();
 
         LecturaDHT lectura = sensorDHT.getUltimaLectura();
-        if (lectura.valida) {
+        if (lectura.valida)
+        {
           LecturaSensores telemetria;
           telemetria.device_id = "galpon_01";
           telemetria.temperatura = lectura.temperatura;
           telemetria.humedad = lectura.humedad;
           telemetria.calidad_aire = 450;  // Valor dummy
-          telemetria.distancia_agua = 10;  // Valor dummy
+          telemetria.distancia_agua = 10; // Valor dummy
 
-          if (servicioAPI.enviarLecturas(telemetria)) {
+          if (servicioAPI.enviarLecturas(telemetria))
+          {
             LOG_DEBUG("✓ Telemetría enviada");
-          } else {
+          }
+          else
+          {
             LOG_WARN("Falló envío de telemetría");
           }
         }
       }
 
       // ─── Consulta de comandos cada 10 segundos ──────────────────
-      if (autenticado && (millis() - ultimaConsultaComandos >= 10000)) {
+      if (autenticado && (millis() - ultimaConsultaComandos >= 10000))
+      {
         ultimaConsultaComandos = millis();
 
         String comandos = servicioAPI.consultarComandosPendientes();
-        if (comandos != "[]" && !comandos.isEmpty()) {
+        if (comandos != "[]" && !comandos.isEmpty())
+        {
           LOG_DEBUG("Comandos pendientes recibidos: " + comandos);
-          
+
           // Parsear y procesar comandos (extensible para futuros comandos)
           DynamicJsonDocument doc(1024);
           DeserializationError error = deserializeJson(doc, comandos);
-          if (error == DeserializationError::Ok) {
+          if (error == DeserializationError::Ok)
+          {
             JsonArray array = doc.as<JsonArray>();
-            for (JsonVariant cmd : array) {
+            for (JsonVariant cmd : array)
+            {
               String command_id = cmd["command_id"] | "unknown";
               String nombre = cmd["nombre_actuador"] | "unknown";
-              
+
               LOG_DEBUG("Procesando comando: " + nombre);
-              
+
               // Aquí se procesaría cada comando según nombre y acción
               // Por ahora, simplemente confirmar ejecución
               servicioAPI.confirmarComando(command_id, true, "Ejecutado");
@@ -413,7 +455,9 @@ void tareaWiFi(void *pvParameters) {
           }
         }
       }
-    } else {
+    }
+    else
+    {
       LOG_WARN("WiFi desconectado - Reintentando conexión");
       autenticado = false;
     }
@@ -426,7 +470,8 @@ void tareaWiFi(void *pvParameters) {
 // ─── SETUP ───────────────────────────────────────────────
 // ═══════════════════════════════════════════════════════════
 
-void setup() {
+void setup()
+{
   Serial.begin(BAUD_RATE);
   delay(500);
 
@@ -484,13 +529,16 @@ void setup() {
 
   unsigned long tiempoCalib = millis();
 
-  while ((millis() - tiempoCalib) < 15000) {
-    if (Serial.available()) {
+  while ((millis() - tiempoCalib) < 15000)
+  {
+    if (Serial.available())
+    {
       String cmd = Serial.readStringUntil('\n');
       cmd.trim();
       cmd.toUpperCase();
 
-      if (cmd == "TARA") {
+      if (cmd == "TARA")
+      {
         Serial.println("⏳ Ejecutando tara del HX711...");
         sensorPeso.setFactor(HX711_FACTOR_ESCALA);
         sensorPeso.tara();
@@ -502,7 +550,8 @@ void setup() {
     delay(100);
   }
 
-  if (!calibracionCompletada) {
+  if (!calibracionCompletada)
+  {
     LOG_WARN("Calibración omitida — Usando factor por defecto.");
     sensorPeso.setFactor(HX711_FACTOR_ESCALA);
   }
@@ -519,6 +568,7 @@ void setup() {
 // ─── LOOP PRINCIPAL ───────────────────────────────────────
 // ═══════════════════════════════════════════════════════════
 
-void loop() {
+void loop()
+{
   vTaskDelay(pdMS_TO_TICKS(1000));
 }
