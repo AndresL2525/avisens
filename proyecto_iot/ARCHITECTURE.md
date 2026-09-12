@@ -82,63 +82,7 @@ Coordina el ciclo de vida del microcontrolador, la tara inicial y el disparo del
 * $01$: Operación Normal (Lazo cerrado de lectura y control activo).
 * $10$: **Fail-Safe Activo** (Relés K1, K2, K3 apagados en `HIGH`; Bomba K4 encendida en `LOW` por seguridad).
 
-<svg viewBox="0 0 650 380" width="100%" xmlns="http://www.w3.org/2000/svg" style="background: transparent; font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;">
-  <defs>
-    <marker id="arr1" viewBox="0 0 10 10" refX="6" refY="5" markerWidth="6" markerHeight="6" orient="auto-angle">
-      <path d="M 0 1.5 L 8 5 L 0 8.5 z" fill="#1e293b" />
-    </marker>
-    <style>
-      .state { fill: #ffffff; stroke: #1e293b; stroke-width: 2.5; }
-      .state-txt { font-size: 16px; font-weight: bold; fill: #1e293b; text-anchor: middle; dominant-baseline: central; }
-      .trans { fill: none; stroke: #1e293b; stroke-width: 1.8; }
-      .lbl { font-size: 13px; font-weight: 600; fill: #0f172a; text-anchor: middle; }
-      .lbl-bg { fill: #ffffff; opacity: 0.95; }
-    </style>
-  </defs>
-
-  <!-- Nodos -->
-  <circle cx="160" cy="110" r="34" class="state" />
-  <text x="160" y="110" class="state-txt">S₀: INIT</text>
-
-  <circle cx="480" cy="110" r="34" class="state" />
-  <text x="480" y="110" class="state-txt">S₁: CALIB</text>
-
-  <circle cx="480" cy="270" r="34" class="state" />
-  <text x="480" y="270" class="state-txt">S₂: MONIT</text>
-
-  <circle cx="160" cy="270" r="34" class="state" />
-  <text x="160" y="270" class="state-txt">S₃: ERROR</text>
-
-  <!-- Self-Loops -->
-  <path d="M 140 78 C 120 20, 200 20, 180 78" class="trans" marker-end="url(#arr1)" />
-  <text x="160" y="28" class="lbl">C=0 / 00</text>
-
-  <path d="M 512 88 C 570 70, 570 150, 512 132" class="trans" marker-end="url(#arr1)" />
-  <text x="575" y="114" class="lbl">T=0 / 00</text>
-
-  <path d="M 512 250 C 570 230, 570 310, 512 292" class="trans" marker-end="url(#arr1)" />
-  <text x="575" y="274" class="lbl">F=0 / 01</text>
-
-  <path d="M 128 292 C 70 310, 70 230, 128 250" class="trans" marker-end="url(#arr1)" />
-  <text x="65" y="274" class="lbl">R=0 / 10</text>
-
-  <!-- Transiciones -->
-  <path d="M 194 110 L 446 110" class="trans" marker-end="url(#arr1)" />
-  <rect x="295" y="93" width="55" height="18" class="lbl-bg" rx="3" />
-  <text x="320" y="106" class="lbl">C=1 / 00</text>
-
-  <path d="M 480 144 L 480 236" class="trans" marker-end="url(#arr1)" />
-  <rect x="420" y="181" width="55" height="18" class="lbl-bg" rx="3" />
-  <text x="448" y="194" class="lbl">T=1 / 01</text>
-
-  <path d="M 446 270 L 194 270" class="trans" marker-end="url(#arr1)" />
-  <rect x="295" y="253" width="55" height="18" class="lbl-bg" rx="3" />
-  <text x="320" y="266" class="lbl">F=1 / 10</text>
-
-  <path d="M 160 236 L 160 144" class="trans" marker-end="url(#arr1)" />
-  <rect x="165" y="181" width="60" height="18" class="lbl-bg" rx="3" />
-  <text x="195" y="194" class="lbl">R=1 / 00</text>
-</svg>
+![FSM Global](avisens-backend/img/fsm_global.png)
 
 | Estado Actual ($Q_1 Q_0$) | Entradas ($C, T, F, R$) | Estado Siguiente ($D_1 D_0$) | Salidas ($Y_1 Y_0$) | Acción FSM / Periféricos |
 | :---: | :---: | :---: | :---: | :--- |
@@ -321,38 +265,7 @@ Controla la dosificación periódica de alimento balanceado accionando el canal 
 * $0$: **Apagado** (`EN2=0, IN3=0, IN4=0`).
 * $1$: **Encendido al 50% PWM** (`EN2=128, IN3=1, IN4=0`).
 
-<svg viewBox="0 0 520 220" width="100%" xmlns="http://www.w3.org/2000/svg" style="background: transparent; font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;">
-  <defs>
-    <marker id="arr4" viewBox="0 0 10 10" refX="6" refY="5" markerWidth="6" markerHeight="6" orient="auto-angle">
-      <path d="M 0 1.5 L 8 5 L 0 8.5 z" fill="#1e293b" />
-    </marker>
-  </defs>
-
-  <!-- Nodos -->
-  <circle cx="120" cy="110" r="34" class="state" />
-  <text x="120" y="110" class="state-txt">S₀: OFF</text>
-
-  <circle cx="400" cy="110" r="34" class="state" />
-  <text x="400" y="110" class="state-txt">S₁: ON</text>
-
-  <!-- Self-Loops -->
-  <path d="M 98 88 C 40 70, 40 150, 98 132" class="trans" marker-end="url(#arr4)" />
-  <text x="35" y="114" class="lbl">T'=1 + E'=1 / 0</text>
-
-  <path d="M 422 88 C 480 70, 480 150, 422 132" class="trans" marker-end="url(#arr4)" />
-  <text x="490" y="114" class="lbl">T=0 · E=1 / 1</text>
-
-  <!-- Transiciones -->
-  <!-- S0 -> S1 (Arriba curvado) -->
-  <path d="M 152 98 C 240 50, 280 50, 368 98" class="trans" marker-end="url(#arr4)" />
-  <rect x="225" y="55" width="70" height="18" class="lbl-bg" rx="3" />
-  <text x="260" y="68" class="lbl">T=1 · E=1 / 1</text>
-
-  <!-- S1 -> S0 (Abajo curvado) -->
-  <path d="M 368 122 C 280 170, 240 170, 152 122" class="trans" marker-end="url(#arr4)" />
-  <rect x="225" y="148" width="70" height="18" class="lbl-bg" rx="3" />
-  <text x="260" y="161" class="lbl">T=1 + E'=1 / 0</text>
-</svg>
+![FSM GLOBAL](avisens-backen)
 
 | Estado Actual ($Q$) | Entradas ($T_{5m}, E$) | Estado Siguiente ($D$) | Salida ($Y$) | Acción del Sinfín |
 | :---: | :---: | :---: | :---: | :--- |
