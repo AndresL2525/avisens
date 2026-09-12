@@ -3,56 +3,63 @@
 
 #include <Arduino.h>
 #include <ESP32Servo.h>
+#include <freertos/FreeRTOS.h>
+#include <freertos/task.h>
 #include "config.h"
 
-/**
- * @class ControlServo
- * @brief Controlador del servomotor de la puerta con FSM.
- * 
- * Implementa máquina de estados no bloqueante para:
- * - Detectar presencia (KY032)
- * - Abrir puerta (0°)
- * - Mantener abierta (NEUTRO)
- * - Cerrar puerta (180°)
- * - Estado de reposo
- * 
- * Usa millis() para timing de giros y tiempo abierto.
- */
-class ControlServo {
- public:
-  /**
-   * @brief Constructor.
-   */
+#ifndef ESTADO_PUERTA_DEFINIDO
+#define ESTADO_PUERTA_DEFINIDO
+enum class EstadoPuerta : uint8_t
+{
+  CERRADA = 0,
+  ABRIENDO,
+  ABIERTA,
+  CERRANDO
+};
+#endif
+
+#ifndef ANGULO_CERRADA
+#define ANGULO_CERRADA 0
+#endif
+
+#ifndef ANGULO_ABIERTA
+#define ANGULO_ABIERTA 90
+#endif
+
+#ifndef SERVO_PIN
+#define SERVO_PIN 18
+#endif
+
+#ifndef SERVO_DURACION_GIRO
+#define SERVO_DURACION_GIRO 600
+#endif
+
+#ifndef SERVO_TIEMPO_ABIERTA
+#define SERVO_TIEMPO_ABIERTA 3000
+#endif
+
+#ifndef LOG_DEBUG
+#define LOG_DEBUG(msg) Serial.println(F("[DEBUG] " msg))
+#endif
+#ifndef LOG_WARN
+#define LOG_WARN(msg) Serial.println(F("[WARN]  " msg))
+#endif
+#ifndef LOG_ERROR
+#define LOG_ERROR(msg) Serial.println(F("[ERROR] " msg))
+#endif
+
+class ControlServo
+{
+public:
   ControlServo();
 
-  /**
-   * @brief Inicializa el servo y lo coloca en posición neutra.
-   */
   void begin();
-
-  /**
-   * @brief Actualiza la FSM (llamar cada ciclo de control).
-   * @param hayPresencia true si se detectó presencia (KY032 = LOW)
-   */
   void actualizar(bool hayPresencia);
-
-  /**
-   * @brief Obtiene estado actual de la puerta.
-   * @return EstadoPuerta
-   */
   EstadoPuerta getEstado() const { return estado_; }
-
-  /**
-   * @brief Fuerza cierre de puerta (emergencia).
-   */
   void cerrarEmergencia();
-
-  /**
-   * @brief Reinicia la FSM.
-   */
   void reset();
 
- private:
+private:
   Servo servo_;
   EstadoPuerta estado_;
   unsigned long tiempoEstado_;
@@ -62,4 +69,4 @@ class ControlServo {
   void escribirServoCuidado(uint8_t angulo);
 };
 
-#endif // CONTROL_SERVO_H
+#endif

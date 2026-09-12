@@ -6,11 +6,11 @@ Configuración compartida para pytest — Fixtures, mocks y base de datos simula
 
 import pytest
 import pytest_asyncio
-import asyncio
 from datetime import datetime, timezone, timedelta
 from typing import AsyncGenerator
 from mongomock_motor import AsyncMongoMockClient
 import jwt
+import uuid
 from app.config import settings
 from httpx import AsyncClient, ASGITransport
 
@@ -21,14 +21,10 @@ from httpx import AsyncClient, ASGITransport
 
 @pytest_asyncio.fixture
 async def mock_db() -> AsyncGenerator:
-    """
-    Crea una base de datos MongoDB simulada (mongomock_motor).
-    Se usa en lugar de MongoDB real para tests.
-    """
+    """Crea una base de datos MongoDB simulada (mongomock_motor)."""
     client = AsyncMongoMockClient()
-    db = client[settings.mongodb_name]
+    db = client[settings.mongodb_db_name]
 
-    # Crear índices necesarios
     await db["sensor_readings"].create_index("device_id")
     await db["sensor_readings"].create_index("timestamp")
     await db["events"].create_index("device_id")
@@ -38,8 +34,23 @@ async def mock_db() -> AsyncGenerator:
 
     yield db
 
-    # Limpiar después de cada test
-    await client.drop_database(settings.mongodb_name)
+
+# ═══════════════════════════════════════════════════════════
+# ─── HELPERS JWT ────────────────────────────────────────────
+# ═══════════════════════════════════════════════════════════
+
+
+def _make_token(sub: str, token_type: str, exp_offset: int = 3600):
+    """Crea token JWT con jti (requerido por la app)."""
+    now = datetime.now(timezone.utc)
+    payload = {
+        "sub": sub,
+        "type": token_type,
+        "jti": str(uuid.uuid4()),
+        "iat": now,
+        "exp": now.timestamp() + exp_offset,
+    }
+    return jwt.encode(payload, settings.jwt_secret_key, algorithm="HS256")
 
 
 # ═══════════════════════════════════════════════════════════
@@ -49,52 +60,31 @@ async def mock_db() -> AsyncGenerator:
 
 @pytest.fixture
 def valid_device_token() -> str:
-    """Genera un token JWT válido para dispositivo."""
-    payload = {
-        "sub": "galpon_test_01",
-        "type": "device",
-        "iat": datetime.now(timezone.utc),
-        "exp": datetime.now(timezone.utc).timestamp() + 3600,
-    }
-    token = jwt.encode(payload, settings.jwt_secret_key, algorithm="HS256")
-    return token
+    """Token JWT válido para dispositivo."""
+    return _make_token("galpon_test_01", "device")
 
 
 @pytest.fixture
 def valid_user_token() -> str:
-    """Genera un token JWT válido para usuario."""
-    payload = {
-        "sub": "user_test_01@example.com",
-        "type": "user",
-        "iat": datetime.now(timezone.utc),
-        "exp": datetime.now(timezone.utc).timestamp() + 3600,
-    }
-    token = jwt.encode(payload, settings.jwt_secret_key, algorithm="HS256")
-    return token
+    """Token JWT válido para usuario."""
+    return _make_token("user_test_01@example.com", "user")
 
 
 @pytest.fixture
 def expired_token() -> str:
-    """Genera un token JWT expirado."""
-    past_time = datetime.now(timezone.utc) - timedelta(hours=1)
-    payload = {
-        "sub": "galpon_test_01",
-        "type": "device",
-        "iat": past_time,
-        "exp": past_time.timestamp() + 3600,
-    }
-    token = jwt.encode(payload, settings.jwt_secret_key, algorithm="HS256")
-    return token
+    """Token JWT expirado."""
+    return _make_token("galpon_test_01", "device", exp_offset=-3600)
 
 
 @pytest.fixture
 def invalid_token() -> str:
     """Token JWT firmado con clave incorrecta."""
-    payload = {"sub": "galpon_test_01", "type": "device"}
-    token = jwt.encode(
-        payload, "wrong_secret_key", algorithm="HS256"  # Clave incorrecta
-    )
-    return token
+    payload = {
+        "sub": "galpon_test_01",
+        "type": "device",
+        "jti": str(uuid.uuid4()),
+    }
+    return jwt.encode(payload, "wrong_secret_key", algorithm="HS256")
 
 
 # ═══════════════════════════════════════════════════════════
@@ -104,7 +94,6 @@ def invalid_token() -> str:
 
 @pytest.fixture
 def sample_sensor_reading():
-    """Lectura de sensor válida para testing."""
     return {
         "device_id": "galpon_test_01",
         "temperatura": 28.5,
@@ -116,10 +105,9 @@ def sample_sensor_reading():
 
 @pytest.fixture
 def sample_sensor_reading_outlier():
-    """Lectura de sensor que dispara alerta (fuera de rango)."""
     return {
         "device_id": "galpon_test_02",
-        "temperatura": 75.5,  # Fuera de rango (-10, 60)
+        "temperatura": 75.5,
         "humedad": 65.0,
         "calidad_aire": 450,
         "timestamp": datetime.now(timezone.utc),
@@ -128,7 +116,6 @@ def sample_sensor_reading_outlier():
 
 @pytest.fixture
 def sample_event():
-    """Evento de alerta para testing."""
     return {
         "device_id": "galpon_test_01",
         "tipo": "ALERTA",
@@ -141,13 +128,12 @@ def sample_event():
 
 
 # ═══════════════════════════════════════════════════════════
-# ─── OVERRIDE DE DEPENDENCIAS PARA TESTING ──────────────────
+# ─── OVERRIDE DE DEPENDENCIAS ───────────────────────────────
 # ═══════════════════════════════════════════════════════════
 
 
 @pytest_asyncio.fixture
 async def app_with_mock_db(mock_db):
-    """FastAPI app con base de datos mockeada."""
     from app.main import app
 
     async def override_get_database():
@@ -158,13 +144,11 @@ async def app_with_mock_db(mock_db):
     app.dependency_overrides[get_database] = override_get_database
 
     yield app
-
     app.dependency_overrides.clear()
 
 
 @pytest_asyncio.fixture
 async def async_client(app_with_mock_db) -> AsyncGenerator[AsyncClient, None]:
-    """Cliente HTTP asíncrono para testing."""
     transport = ASGITransport(app=app_with_mock_db)
     async with AsyncClient(transport=transport, base_url="http://test") as client:
         yield client
@@ -177,7 +161,6 @@ async def async_client(app_with_mock_db) -> AsyncGenerator[AsyncClient, None]:
 
 @pytest_asyncio.fixture
 async def populate_sensor_readings(mock_db):
-    """Inserta lecturas de sensores de prueba en la DB."""
     readings = [
         {
             "device_id": "galpon_test_01",
@@ -195,7 +178,6 @@ async def populate_sensor_readings(mock_db):
 
 @pytest_asyncio.fixture
 async def populate_events(mock_db):
-    """Inserta eventos de prueba en la DB."""
     events = [
         {
             "device_id": "galpon_test_01",
