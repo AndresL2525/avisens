@@ -67,17 +67,27 @@ cd avisens-backend
 
 # 2. Crear entorno virtual
 python -m venv venv
-source venv/bin/activate  # Windows: venv\Scripts\activate
+
+# Activar entorno virtual:
+# En Linux / macOS:
+source venv/bin/activate
+# En Windows (PowerShell):
+.\venv\Scripts\Activate.ps1
+# En Windows (CMD):
+venv\Scripts\activate.bat
 
 # 3. Instalar dependencias
 pip install -r requirements.txt
 
 # 4. Configurar variables de entorno
+# Linux / macOS / PowerShell:
 cp .env.example .env
+# Windows (CMD alternativo si no reconoce cp):
+copy .env.example .env
 # Edita .env con tus credenciales de MongoDB Atlas y JWT
 
 # 5. Ejecutar
-uvicorn app.main:app --reload --host 0.0.0.0 --port 8000
+uvicorn app.main:app --reload --host 0.0.0.0 --port 8000orn app.main:app --reload --host 0.0.0.0 --port 8000
 ```
 
 ### Opción B: Con Docker (producción)
