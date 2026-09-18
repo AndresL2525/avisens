@@ -33,21 +33,23 @@
  */
 struct LecturaSensores {
   String device_id;
-  float temperatura;
-  float humedad;
-  int calidad_aire;
-  int distancia_agua;
+  float temperatura;   // °C
+  float humedad;       // % RH
+  float peso;          // gramos (HX711)
+  bool obstaculo;       // KY-032 (true = detectado)
+  int calidad_aire;    // raw ADC MQ135 [0,4095]
+  float voltaje_aire;  // voltaje MQ135 [0.0, 3.3]
 };
 
 /**
  * @struct ComandoActuador
- * @brief Comando pendiente recibido del backend
+ * @brief Comando pendiente recibido del backend (modelo ActuatorCommand del SSD)
  */
 struct ComandoActuador {
-  String command_id;
-  String nombre_actuador;
-  String accion;  // "ON", "OFF", "TOGGLE", etc.
-  JsonObject metadata;
+  String id;               // id del documento en Mongo, usado para confirmar ejecución
+  String nombre;            // "calefactor" | "extractor" | "humidificador" | "alimentador"
+  String modo;               // "AUTO" | "MANUAL"
+  bool orden_manual;         // obligatorio si modo == "MANUAL"
 };
 
 /**

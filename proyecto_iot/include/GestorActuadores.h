@@ -83,6 +83,54 @@ class GestorActuadores {
    */
   void forzarRele(uint8_t rele, bool estado);
 
+  // ─── Control remoto / modo MANUAL (comandos desde la app web) ────
+
+  /**
+   * @brief Pone un relé en modo MANUAL y aplica el estado indicado.
+   *
+   * Mientras un relé esté en modo MANUAL, actualizar() NO sobrescribe
+   * su estado con la lógica automática — queda "congelado" en el
+   * valor que envió la app, hasta que se llame a establecerAutomatico().
+   *
+   * @param rele 1-4 (ver releDesdeNombre)
+   * @param estado true = ON, false = OFF
+   */
+  void establecerManual(uint8_t rele, bool estado);
+
+  /**
+   * @brief Devuelve un relé al control de la lógica automática.
+   * @param rele 1-4
+   */
+  void establecerAutomatico(uint8_t rele);
+
+  /**
+   * @brief Indica si un relé está actualmente en modo MANUAL.
+   */
+  bool esManual(uint8_t rele) const;
+
+  /**
+   * @brief Obtiene el estado actual de un relé por número (1-4).
+   * @return true = ON, false = OFF (también si el número no es válido)
+   */
+  bool getEstado(uint8_t rele) const;
+
+  /**
+   * @brief Traduce el nombre lógico del actuador (tal como lo usa el
+   * backend en actuator_commands.nombre) al número de relé interno.
+   *
+   * Nombres reconocidos: "calefactor" (K1), "ventilador" (K2),
+   * "extractor" (K3), "bomba" (K4). No distingue mayúsculas/minúsculas.
+   *
+   * @return 1-4, o 0 si el nombre no se reconoce.
+   */
+  static uint8_t releDesdeNombre(const String& nombre);
+
+  /**
+   * @brief Nombre lógico de un relé (inverso de releDesdeNombre).
+   * Útil para reportar estado con el mismo nombre que espera el backend.
+   */
+  static String nombreDesdeRele(uint8_t rele);
+
  private:
   Actuador k1_;  // Calefacción
   Actuador k2_;  // Ventilador
@@ -91,6 +139,12 @@ class GestorActuadores {
 
   bool ultimoEstadoBomba_;
   unsigned long ultimoControl_;
+
+  // Modo MANUAL por relé: true = bajo control remoto (app), false = AUTO
+  bool manualK1_ = false;
+  bool manualK2_ = false;
+  bool manualK3_ = false;
+  bool manualK4_ = false;
 
   // Métodos de lógica interna
   void aplicarControl(

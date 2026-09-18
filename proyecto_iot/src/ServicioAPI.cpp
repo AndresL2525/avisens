@@ -94,8 +94,10 @@ bool ServicioAPI::enviarLecturas(const LecturaSensores& datos) {
   doc["device_id"] = datos.device_id;
   doc["temperatura"] = datos.temperatura;
   doc["humedad"] = datos.humedad;
+  doc["peso"] = datos.peso;
+  doc["obstaculo"] = datos.obstaculo;
   doc["calidad_aire"] = datos.calidad_aire;
-  doc["distancia_agua"] = datos.distancia_agua;
+  doc["voltaje_aire"] = datos.voltaje_aire;
 
   String payload;
   serializeJson(doc, payload);

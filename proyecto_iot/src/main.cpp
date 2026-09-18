@@ -1,21 +1,3 @@
-/**
- * =============================================================================
- * main.cpp (MODIFICADO)
- *
- * Cambios principales:
- * 1. Incluye ServicioAPI para comunicación con backend
- * 2. Sincroniza FSM Global con documento SSD:
- *    - Variable C: Contador de estabilización de arranque (>=10 ciclos)
- *    - Variable T: Bandera de calibración completada del HX711
- *    - Variable F: Fallos acumulados >= 3
- *    - Variable R: Comando de rearme manual por Serial
- * 3. En ERROR, envía evento de falla al backend ANTES de pausar
- * 4. En tareaWiFi: envía telemetría cada 5s y consulta comandos cada 10s
- * 5. Detección de gradiente térmico (ΔT > 10°C en 5s)
- *
- * =============================================================================
- */
-
 #include <Arduino.h>
 #include <esp_task_wdt.h>
 #include <freertos/task.h>
@@ -36,9 +18,7 @@
 #include "ConexionWiFi.h"
 #include "ServicioAPI.h"
 
-// ═══════════════════════════════════════════════════════════
-// ─── INSTANCIAS GLOBALES ──────────────────────────────────
-// ═══════════════════════════════════════════════════════════
+//  INSTANCIAS GLOBALES
 
 EstadoSistema estadoSistema = EstadoSistema::INIT;
 
@@ -76,28 +56,25 @@ unsigned long ultimaEnvioTelemetria = 0;
 unsigned long ultimaConsultaComandos = 0;
 
 // ─── Variables FSM (Documento SSD) ──────────────────────
-uint32_t ciclosArranque = 0;        // Variable C: contador de arranque
-bool calibracionCompletada = false; // Variable T: tara HX711 completada
-uint32_t fallosAcumulados = 0;      // Variable F: contador de fallos >= 3
-bool comandoRearme = false;         // Variable R: rearme manual por serial
+uint32_t ciclosArranque = 0;
+bool calibracionCompletada = false;
+uint32_t fallosAcumulados = 0;
+bool comandoRearme = false;
 
-// ─── Counters para debug ──────────────────────────────────
 uint32_t ciclosTarea = 0;
 uint32_t erroresGlobales = 0;
 
-// ─── Historial de temperatura para detectar gradientes ────
+// Historial de temperatura para detectar gradientes ─
 struct HistorialTemperatura
 {
   float temperatura;
   unsigned long timestamp;
 } ultimaTemperatura = {0.0f, 0};
 
-// ─── Filtro de picos para temperatura ────────────────────
+// Filtro de picos para temperatura
 MovingAverage<float, 10> filtroTemperatura;
 
-// ═══════════════════════════════════════════════════════════
-// ─── FUNCIÓN: Enviar evento de falla ─────────────────────
-// ═══════════════════════════════════════════════════════════
+// FUNCIÓN: Enviar evento de falla
 
 void enviarEventoFallaAlBackend(
     const String &origen,
@@ -105,7 +82,6 @@ void enviarEventoFallaAlBackend(
     const String &nivel = "critico")
 {
 
-  // Construir metadata JSON
   String metadataJson = "";
   {
     DynamicJsonDocument metadata(512);
@@ -127,10 +103,6 @@ void enviarEventoFallaAlBackend(
     LOG_DEBUG("✓ Evento de falla enviado al backend");
   }
 }
-
-// ═══════════════════════════════════════════════════════════
-// ─── FUNCIÓN: Detectar gradiente térmico abrupto ─────────
-// ═══════════════════════════════════════════════════════════
 
 bool detectarGradienteTermico(float temperatura, unsigned long ahora)
 {
@@ -159,10 +131,6 @@ bool detectarGradienteTermico(float temperatura, unsigned long ahora)
   ultimaTemperatura.timestamp = ahora;
   return false;
 }
-
-// ═══════════════════════════════════════════════════════════
-// ─── TAREA PRINCIPAL — Core 0 (FreeRTOS) ────────────────
-// ═══════════════════════════════════════════════════════════
 
 void tareaGalpon(void *pvParameters)
 {
@@ -368,10 +336,6 @@ void tareaGalpon(void *pvParameters)
   }
 }
 
-// ═══════════════════════════════════════════════════════════
-// ─── TAREA WiFi — Core 1 (FreeRTOS) ───────────────────────
-// ═══════════════════════════════════════════════════════════
-
 void tareaWiFi(void *pvParameters)
 {
   Serial.println("[WiFi Task] Iniciada en Core 1");
@@ -383,7 +347,7 @@ void tareaWiFi(void *pvParameters)
 
   for (;;)
   {
-    // ─── Mantener conexión WiFi ──────────────────────────────────────
+
     conexionWiFi.actualizar();
 
     if (WiFi.isConnected())
@@ -399,7 +363,6 @@ void tareaWiFi(void *pvParameters)
         }
       }
 
-      // ─── Envío de telemetría cada 5 segundos ────────────────────
       if (autenticado && (millis() - ultimaEnvioTelemetria >= 5000))
       {
         ultimaEnvioTelemetria = millis();
@@ -407,12 +370,18 @@ void tareaWiFi(void *pvParameters)
         LecturaDHT lectura = sensorDHT.getUltimaLectura();
         if (lectura.valida)
         {
+          LecturaMQ135 gas = sensorMQ135.getUltimaLectura();
+          LecturaPeso peso = sensorPeso.getUltimaLectura();
+          LecturaKY032 ky032 = sensorKY032.getUltimaLectura();
+
           LecturaSensores telemetria;
           telemetria.device_id = "galpon_01";
           telemetria.temperatura = lectura.temperatura;
           telemetria.humedad = lectura.humedad;
-          telemetria.calidad_aire = 450;  // Valor dummy
-          telemetria.distancia_agua = 10; // Valor dummy
+          telemetria.peso = peso.peso;
+          telemetria.obstaculo = ky032.presencia;
+          telemetria.calidad_aire = gas.rawValue;
+          telemetria.voltaje_aire = gas.voltaje;
 
           if (servicioAPI.enviarLecturas(telemetria))
           {
@@ -425,7 +394,6 @@ void tareaWiFi(void *pvParameters)
         }
       }
 
-      // ─── Consulta de comandos cada 10 segundos ──────────────────
       if (autenticado && (millis() - ultimaConsultaComandos >= 10000))
       {
         ultimaConsultaComandos = millis();
@@ -435,7 +403,6 @@ void tareaWiFi(void *pvParameters)
         {
           LOG_DEBUG("Comandos pendientes recibidos: " + comandos);
 
-          // Parsear y procesar comandos (extensible para futuros comandos)
           DynamicJsonDocument doc(1024);
           DeserializationError error = deserializeJson(doc, comandos);
           if (error == DeserializationError::Ok)
@@ -443,15 +410,43 @@ void tareaWiFi(void *pvParameters)
             JsonArray array = doc.as<JsonArray>();
             for (JsonVariant cmd : array)
             {
-              String command_id = cmd["command_id"] | "unknown";
-              String nombre = cmd["nombre_actuador"] | "unknown";
+              String command_id = cmd["_id"] | "unknown";
+              String nombre = cmd["nombre"] | "unknown";
+              String modo = cmd["modo"] | "AUTO";
+              bool ordenManual = cmd["orden_manual"] | false;
 
-              LOG_DEBUG("Procesando comando: " + nombre);
+              uint8_t rele = GestorActuadores::releDesdeNombre(nombre);
 
-              // Aquí se procesaría cada comando según nombre y acción
-              // Por ahora, simplemente confirmar ejecución
+              if (rele == 0)
+              {
+                LOG_WARN("Comando con actuador desconocido: " + nombre);
+                servicioAPI.confirmarComando(command_id, false, "Actuador desconocido: " + nombre);
+                continue;
+              }
+
+              if (modo == "MANUAL")
+              {
+                // Apaga/enciende el actuador desde la app y lo "congela"
+                // en ese estado hasta que llegue un comando modo=AUTO.
+                LOG_WARN("Comando MANUAL: " + nombre + " -> " + (ordenManual ? "ON" : "OFF"));
+                gestorActuadores.establecerManual(rele, ordenManual);
+              }
+              else
+              {
+                LOG_DEBUG("Comando AUTO: " + nombre + " -> devuelto a control automático");
+                gestorActuadores.establecerAutomatico(rele);
+              }
+
+              // Reporta a la API el estado real ya aplicado en el actuador
+              servicioAPI.reportarEstadoActuador(nombre, gestorActuadores.getEstado(rele), modo);
+
+              // Confirma ejecución del comando
               servicioAPI.confirmarComando(command_id, true, "Ejecutado");
             }
+          }
+          else
+          {
+            LOG_ERROR("Error parseando comandos pendientes");
           }
         }
       }
@@ -466,10 +461,6 @@ void tareaWiFi(void *pvParameters)
   }
 }
 
-// ═══════════════════════════════════════════════════════════
-// ─── SETUP ───────────────────────────────────────────────
-// ═══════════════════════════════════════════════════════════
-
 void setup()
 {
   Serial.begin(BAUD_RATE);
@@ -481,11 +472,11 @@ void setup()
   Serial.println("+ ServicioAPI + FSM Sincronizada");
   Serial.println("================================");
 
-  // ─── Watchdog Timer ──────────────────────────────────────
+  // Watchdog Timer
   esp_task_wdt_init(WDT_TIMEOUT_S, true);
   Serial.printf("[WDT] Configurado a %d segundos.\n", WDT_TIMEOUT_S);
 
-  // ─── Inicialización de Módulos ───────────────────────────
+  //  Inicialización de Módulos
   Serial.println("\n[SETUP] Inicializando sensores...");
   sensorDHT.begin();
   sensorMQ135.begin();
@@ -563,10 +554,6 @@ void setup()
   Serial.println("  REARME - Reiniciar sistema desde INIT");
   Serial.println("");
 }
-
-// ═══════════════════════════════════════════════════════════
-// ─── LOOP PRINCIPAL ───────────────────────────────────────
-// ═══════════════════════════════════════════════════════════
 
 void loop()
 {
