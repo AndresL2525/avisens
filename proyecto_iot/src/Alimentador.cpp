@@ -12,7 +12,7 @@ void Alimentador::begin() {
   pinMode(IN3_PIN, OUTPUT);
   pinMode(IN4_PIN, OUTPUT);
 
-  detenerMotor();  // Dejar en estado seguro
+  detenerMotor();
   LOG_DEBUG("Alimentador inicializado");
 }
 
@@ -20,7 +20,6 @@ void Alimentador::actualizar() {
   ahora_ = millis();
 
   if (!habilitado_) {
-    // Si está deshabilitado, forzar apagado
     if (estado_ != EstadoAlimentador::APAGADO) {
       detenerMotor();
       transicionar(EstadoAlimentador::APAGADO);
@@ -32,7 +31,7 @@ void Alimentador::actualizar() {
     case EstadoAlimentador::APAGADO:
       if (ahora_ - tiempoEstado_ >= INTERVALO_ALIMENTO) {
         transicionar(EstadoAlimentador::ENCENDIDO);
-        iniciarMotor(128);  // 50% PWM
+        iniciarMotor(PWM_ALIMENTADOR);
         LOG_DEBUG("Alimentador: ON (50%)");
       }
       break;
@@ -81,5 +80,5 @@ void Alimentador::iniciarMotor(uint8_t pwm) {
   digitalWrite(IN3_PIN, HIGH);
   digitalWrite(IN4_PIN, LOW);
   analogWrite(EN2_PIN, pwm);
-  vTaskDelay(pdMS_TO_TICKS(1));  // Yield
+  vTaskDelay(pdMS_TO_TICKS(1));  // Consolida las tres líneas del L293D antes de seguir
 }

@@ -26,40 +26,27 @@ void GestorActuadores::actualizar(
     bool enErrorDHT,
     bool enErrorUltrasonico) {
 
-  unsigned long ahora = millis();
-
-  // ─── Fail-Safe: Si hay error crítico en sensores ───────
   if (enErrorDHT || enErrorUltrasonico) {
-    LOG_WARN("Sensor en error — Entrando en Fail-Safe");
+    if (!enFailSafe_) {
+      LOG_WARN("Sensor en error — Entrando en Fail-Safe");
+    }
     failSafe();
     return;
   }
 
-  // ─── Lógica de control con umbrales ───────────────────
-
-  // Detectar si hay gases altos
   bool gasesAltos = (rawNH3 >= NH3_ALTO);
 
-  // Calefacción: Activar si NO hay gases altos Y temperatura < TEMP_FRIO
   bool activarCalefaccion = !gasesAltos && (temperatura < TEMP_FRIO);
 
-  // Ventilación (Ventilador + Extractor):
-  // Activar si NO hay calefacción activa Y:
-  //   - Temperatura >= TEMP_CALOR, O
-  //   - Humedad > HUM_EXTRACTORES, O
-  //   - Gases altos
   bool activarVentilacion = !activarCalefaccion &&
                             (temperatura >= TEMP_CALOR ||
                              humedad > HUM_EXTRACTORES ||
                              gasesAltos);
 
-  // Bomba: Uso de histéresis (ON si dist > NIVEL_BOMBA_ON, OFF si dist <= NIVEL_BOMBA_OFF)
   bool activarBomba = calcularActivacionBomba(distanciaAgua, estadoSensorUltrasonico);
 
-  // ─── Aplicar estados ──────────────────────────────────
   aplicarControl(activarCalefaccion, activarVentilacion, activarBomba);
 
-  // ─── Log de monitoreo ──────────────────────────────────
   Serial.println("\n================================");
   Serial.print("Temp: ");
   Serial.print(temperatura, 1);
@@ -93,14 +80,22 @@ void GestorActuadores::actualizar(
 }
 
 void GestorActuadores::failSafe() {
-  // En Fail-Safe: Desactivar calefacción y ventilación
-  // Mantener bomba activa como medida de seguridad
+  // El modo MANUAL se libera: si no, el relé quedaría atrapado en el valor
+  // de emergencia una vez recuperados los sensores.
+  manualK1_ = false;
+  manualK2_ = false;
+  manualK3_ = false;
+  manualK4_ = false;
+
   k1_.desactivar();
   k2_.desactivar();
   k3_.desactivar();
-  k4_.activar();  // Bomba ON para drenaje de emergencia
+  k4_.activar();
 
-  LOG_ERROR("FAIL-SAFE ACTIVADO — Bomba forzada ON");
+  if (!enFailSafe_) {
+    enFailSafe_ = true;
+    LOG_ERROR("FAIL-SAFE ACTIVADO — Bomba forzada ON, reles devueltos a AUTO");
+  }
 }
 
 void GestorActuadores::aplicarControl(
@@ -108,7 +103,8 @@ void GestorActuadores::aplicarControl(
     bool activarVentilacion,
     bool activarBomba) {
 
-  // K1: Calefacción (solo si no hay ventilación) — omitido si está en MANUAL
+  enFailSafe_ = false;
+
   if (!manualK1_) {
     if (activarCalefaccion) {
       k1_.activar();
@@ -117,7 +113,6 @@ void GestorActuadores::aplicarControl(
     }
   }
 
-  // K2: Ventilador (complementa tanto calefacción como ventilación)
   if (!manualK2_) {
     if (activarCalefaccion || activarVentilacion) {
       k2_.activar();
@@ -126,7 +121,6 @@ void GestorActuadores::aplicarControl(
     }
   }
 
-  // K3: Extractor (solo si hay ventilación)
   if (!manualK3_) {
     if (activarVentilacion) {
       k3_.activar();
@@ -135,7 +129,6 @@ void GestorActuadores::aplicarControl(
     }
   }
 
-  // K4: Bomba
   if (!manualK4_) {
     if (activarBomba) {
       k4_.activar();
@@ -144,10 +137,6 @@ void GestorActuadores::aplicarControl(
     }
   }
 }
-
-// ═══════════════════════════════════════════════════════════
-// ─── CONTROL REMOTO / MODO MANUAL ─────────────────────────
-// ═══════════════════════════════════════════════════════════
 
 void GestorActuadores::establecerManual(uint8_t rele, bool estado) {
   switch (rele) {
@@ -219,23 +208,12 @@ uint8_t GestorActuadores::releDesdeNombre(const String& nombre) {
   String n = nombre;
   n.toLowerCase();
 
-  // NOTA IMPORTANTE: el Literal de ActuatorCommand.nombre en el backend
-  // (ver SSD_AVISENS.md, 4.3.2) es exactamente:
-  //   "calefactor" | "extractor" | "humidificador" | "alimentador"
-  // Tu hardware real no tiene humidificador: K2 es un VENTILADOR.
-  // Se acepta "humidificador" como alias de K2 para que el backend
-  // funcione tal cual está documentado, pero deberías decidir si:
-  //   a) renombras el Literal del backend a "ventilador", o
-  //   b) dejas "humidificador" como el nombre lógico que usa la app,
-  //      aunque físicamente mueva el relé del ventilador.
-  // "bomba" (K4) no está en el Literal del backend a propósito: la
-  // bomba se controla solo de forma automática/fail-safe, no manual.
   if (n == "calefactor" || n == "k1") return 1;
   if (n == "ventilador" || n == "humidificador" || n == "k2") return 2;
   if (n == "extractor"  || n == "k3") return 3;
   if (n == "bomba"      || n == "k4") return 4;
 
-  return 0;  // No reconocido
+  return 0;
 }
 
 String GestorActuadores::nombreDesdeRele(uint8_t rele) {
@@ -252,18 +230,15 @@ bool GestorActuadores::calcularActivacionBomba(
     float distancia,
     EstadoSensorUltrasonico estado) {
 
-  // Si hay error en el sensor, mantener último estado (conservador)
   if (estado != EstadoSensorUltrasonico::OK) {
     return ultimoEstadoBomba_;
   }
 
-  // Histéresis: ON si dist > NIVEL_BOMBA_ON, OFF si dist <= NIVEL_BOMBA_OFF
   if (distancia > NIVEL_BOMBA_ON) {
     ultimoEstadoBomba_ = true;
   } else if (distancia <= NIVEL_BOMBA_OFF) {
     ultimoEstadoBomba_ = false;
   }
-  // Si está entre los dos umbrales, mantener estado anterior
 
   return ultimoEstadoBomba_;
 }

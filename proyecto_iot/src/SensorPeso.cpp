@@ -1,70 +1,75 @@
 #include "SensorPeso.h"
 
-// Pines HX711 (configurables en config.h)
-#define HX711_DT   15  // GPIO 15 (DATA)
-#define HX711_SCK  16  // ✅ GPIO 16 (CLOCK) — SIN CONFLICTO
-
 SensorPeso::SensorPeso()
     : pinDT_(HX711_DT),
       pinSCK_(HX711_SCK),
       offsetCero_(0),
       factorEscala_(1.0f),
       tarado_(false),
+      avisoTaraEmitido_(false),
       contadorFallos_(0),
-      ultimoIntento_(0) {
+      ultimoIntento_(0)
+{
   ultimaLectura_ = {0.0f, 0.0f, false, 0};
 }
 
-void SensorPeso::begin() {
+void SensorPeso::begin()
+{
   pinMode(pinDT_, INPUT);
   pinMode(pinSCK_, OUTPUT);
   digitalWrite(pinSCK_, LOW);
 
-  delay(100);
+  delay(100); // El HX711 necesita estabilizar su alimentación antes del primer ciclo
 
-  // Verificar conexión con HX711
-  if (!verificarConexion()) {
+  if (!verificarConexion())
+  {
     LOG_ERROR("HX711 no detectado — Revisar conexión DT/SCK");
     contadorFallos_++;
-  } else {
+  }
+  else
+  {
     LOG_DEBUG("SensorPeso HX711 inicializado");
   }
 }
 
-LecturaPeso SensorPeso::leer() {
-  unsigned long ahora = millis();
+LecturaPeso SensorPeso::leer()
+{
   LecturaPeso lectura;
-  lectura.timestamp = ahora;
+  lectura.peso = 0.0f;
+  lectura.voltaje = 0.0f;
+  lectura.valida = false;
+  lectura.timestamp = millis();
 
-  if (!tarado_) {
-    LOG_WARN("SensorPeso: Ejecuta tara() antes de leer");
-    lectura.valida = false;
+  if (!tarado_)
+  {
+    if (!avisoTaraEmitido_)
+    {
+      LOG_WARN("SensorPeso: sin tara, lecturas de peso deshabilitadas hasta recibir TARA");
+      avisoTaraEmitido_ = true;
+    }
     return lectura;
   }
 
-  long rawADC = leerADC();
-
-  if (rawADC == 0) {
+  long rawADC = 0;
+  if (!leerADC(rawADC))
+  {
     contadorFallos_++;
-    lectura.valida = false;
     Serial.print("⚠ HX711 fallo #");
     Serial.println(contadorFallos_);
     return lectura;
   }
 
-  // Convertir ADC a gramos usando factor de escala
-  float peso = (rawADC - offsetCero_) * factorEscala_;
-
-  // Detección de sobrecarga (típicamente >2^23 en HX711)
-  if (rawADC > 8388607) {
-    LOG_WARN("HX711 sobrecargado");
-    lectura.valida = false;
+  if (rawADC >= HX711_SATURACION_POS || rawADC <= HX711_SATURACION_NEG)
+  {
+    LOG_WARN("HX711 saturado — Celda sobrecargada o mal conectada");
     contadorFallos_++;
     return lectura;
   }
 
-  lectura.peso = (peso < 0) ? 0 : peso;  // No permitir negativos
-  lectura.voltaje = rawADC * (3.3f / 16777216.0f);  // 24-bit
+  float peso = (rawADC - offsetCero_) * factorEscala_;
+
+  lectura.peso = (peso < 0) ? 0 : peso;
+  lectura.voltaje = rawADC * (ADC_VREF / HX711_ADC_FONDO_ESCALA);
   lectura.valida = true;
 
   contadorFallos_ = 0;
@@ -72,33 +77,46 @@ LecturaPeso SensorPeso::leer() {
   return lectura;
 }
 
-LecturaPeso SensorPeso::getUltimaLectura() const {
+LecturaPeso SensorPeso::getUltimaLectura() const
+{
   return ultimaLectura_;
 }
 
-void SensorPeso::tara() {
-  LOG_DEBUG("HX711: Iniciando tara (10 muestras)...");
+void SensorPeso::tara()
+{
+  LOG_DEBUG("HX711: Iniciando tara...");
   delay(500);
 
-  offsetCero_ = promediarLecturas(10);
+  long promedio = 0;
+  if (!promediarLecturas(HX711_MUESTRAS_TARA, promedio))
+  {
+    LOG_ERROR("HX711 sin respuesta — Tara cancelada");
+    tarado_ = false;
+    return;
+  }
 
-  LOG_DEBUG("Tara completada. Offset = ");
-  Serial.println(offsetCero_);
-
+  offsetCero_ = promedio;
   tarado_ = true;
+  avisoTaraEmitido_ = false;
+
+  Serial.print("Tara completada. Offset = ");
+  Serial.println(offsetCero_);
 }
 
-void SensorPeso::setFactor(float factor) {
+void SensorPeso::setFactor(float factor)
+{
   factorEscala_ = factor;
   Serial.print("Factor de escala: ");
   Serial.println(factor);
 }
 
-bool SensorPeso::enError() const {
+bool SensorPeso::enError() const
+{
   return contadorFallos_ >= MAX_FALLOS_SENSOR;
 }
 
-void SensorPeso::reset() {
+void SensorPeso::reset()
+{
   offsetCero_ = 0;
   factorEscala_ = 1.0f;
   tarado_ = false;
@@ -107,36 +125,30 @@ void SensorPeso::reset() {
   LOG_DEBUG("SensorPeso reiniciado");
 }
 
-// ─── Métodos privados ───────────────────────────────────
-
-/**
- * @brief Lee 24 bits del HX711 (protocolo SPI simplificado).
- * 
- * Formato:
- *   DT pasa a LOW cuando datos disponibles
- *   Lee 24 bits en flancos de SCK
- *   25º pulso = selecciona próxima ganancia
- */
-long SensorPeso::leerADC() {
-  // Esperar a que datos estén listos (DT = LOW)
-  unsigned long timeout = millis() + 1000;  // 1 segundo timeout
-  while (digitalRead(pinDT_) == HIGH) {
-    if (millis() > timeout) {
+bool SensorPeso::leerADC(long &valor)
+{
+  // El HX711 señala dato listo bajando DT; sin conversión disponible lo mantiene en alto
+  unsigned long timeout = millis() + HX711_TIMEOUT_MS;
+  while (digitalRead(pinDT_) == HIGH)
+  {
+    if (millis() > timeout)
+    {
       LOG_WARN("HX711 timeout esperando datos");
-      return 0;
+      return false;
     }
     delayMicroseconds(1);
   }
 
   long resultado = 0;
 
-  // Leer 24 bits (MSB primero)
-  for (int i = 0; i < 24; i++) {
+  for (int i = 0; i < HX711_BITS; i++)
+  {
     digitalWrite(pinSCK_, HIGH);
     delayMicroseconds(1);
 
     resultado <<= 1;
-    if (digitalRead(pinDT_) == LOW) {
+    if (digitalRead(pinDT_) == HIGH)
+    {
       resultado |= 1;
     }
 
@@ -144,38 +156,57 @@ long SensorPeso::leerADC() {
     delayMicroseconds(1);
   }
 
-  // 25º pulso (selecciona ganancia 128 para próxima lectura)
+  // Pulso 25: selecciona la ganancia 128 del canal A para la conversión siguiente
   digitalWrite(pinSCK_, HIGH);
   delayMicroseconds(1);
   digitalWrite(pinSCK_, LOW);
   delayMicroseconds(1);
 
-  return resultado;
+  // La palabra llega en complemento a dos de 24 bits: hay que extender el signo a 32
+  if (resultado & 0x800000L)
+  {
+    resultado |= ~0xFFFFFFL;
+  }
+
+  valor = resultado;
+  return true;
 }
 
-/**
- * @brief Verifica si HX711 está conectado.
- */
-bool SensorPeso::verificarConexion() {
-  // Intentar leer 3 veces
-  for (int i = 0; i < 3; i++) {
-    long valor = leerADC();
-    if (valor > 0) {
+bool SensorPeso::verificarConexion()
+{
+  long valor = 0;
+  for (int i = 0; i < 3; i++)
+  {
+    if (leerADC(valor))
+    {
       return true;
     }
-    delay(100);
+    delay(HX711_ESPERA_MUESTRA_MS);
   }
   return false;
 }
 
-/**
- * @brief Promedia N lecturas del ADC.
- */
-long SensorPeso::promediarLecturas(uint16_t muestras) {
+bool SensorPeso::promediarLecturas(uint16_t muestras, long &promedio)
+{
   long suma = 0;
-  for (uint16_t i = 0; i < muestras; i++) {
-    suma += leerADC();
-    delay(100);  // Espacio entre lecturas
+  uint16_t validas = 0;
+  long valor = 0;
+
+  for (uint16_t i = 0; i < muestras; i++)
+  {
+    if (leerADC(valor))
+    {
+      suma += valor;
+      validas++;
+    }
+    delay(HX711_ESPERA_MUESTRA_MS); // El HX711 muestrea a 10 SPS
   }
-  return suma / muestras;
+
+  if (validas == 0)
+  {
+    return false;
+  }
+
+  promedio = suma / validas;
+  return true;
 }

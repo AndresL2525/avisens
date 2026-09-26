@@ -1,5 +1,3 @@
-
-
 #ifndef MOVING_AVERAGE_H
 #define MOVING_AVERAGE_H
 
@@ -12,14 +10,13 @@ class MovingAverage
 {
 public:
   MovingAverage()
-      : index_(0), sum_(0), count_(0), filled_(false), sum_sq_(0)
+      : index_(0), sum_(0), sum_sq_(0), count_(0), filled_(false)
   {
     memset(buffer_, 0, sizeof(buffer_));
   }
 
   T add(T value)
   {
-    // Si el buffer está lleno, restar el valor antiguo que se sobrescribe
     if (filled_)
     {
       T old_value = buffer_[index_];
@@ -51,7 +48,6 @@ public:
 
   bool esPicoRuido(T value, float factorDesviacion = 3.0) const
   {
-    // Necesitamos al menos 2 muestras para calcular desviación
     if (count_ < 2)
     {
       return false;
@@ -61,7 +57,6 @@ public:
     double desviacion = calcularDesviacionEstandar();
     double diferencia = std::abs(static_cast<double>(value - promedio));
 
-    // Regla 3-sigma: si diferencia > 3 * desviacion, es outlier
     return diferencia > (factorDesviacion * desviacion);
   }
 
@@ -75,7 +70,6 @@ public:
     double promedio = static_cast<double>(sum_) / count_;
     double varianza = (static_cast<double>(sum_sq_) / count_) - (promedio * promedio);
 
-    // Evitar raíz cuadrada de número negativo por errores de redondeo
     if (varianza < 0.0)
     {
       varianza = 0.0;
@@ -142,10 +136,10 @@ public:
 private:
   T buffer_[SIZE];
   uint16_t index_;
-  double sum_;    // Suma acumulada
-  double sum_sq_; // Suma de cuadrados (para varianza)
+  double sum_;
+  double sum_sq_;
   uint16_t count_;
   bool filled_;
 };
 
-#endif // MOVING_AVERAGE_H
+#endif

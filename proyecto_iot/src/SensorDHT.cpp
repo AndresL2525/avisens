@@ -1,13 +1,3 @@
-/**
- * SensorDHT.cpp (MODIFICADO)
- * 
- * Cambios:
- * - Validar temperatura en rango [-10, 60]°C
- * - Validar humedad en rango [0, 100]%
- * - Marcar como OUT_OF_RANGE si los valores están fuera de rango físico plausible
- * - Incrementar contador de fallos si está fuera de rango
- */
-
 #include "SensorDHT.h"
 
 SensorDHT::SensorDHT()
@@ -25,14 +15,15 @@ void SensorDHT::begin() {
 LecturaDHT SensorDHT::leer() {
   unsigned long ahora = millis();
 
-  // Lectura no bloqueante: DHT22 requiere ~2.25ms
   float humedad = dht_.readHumidity();
   float temperatura = dht_.readTemperature();
 
   LecturaDHT lectura;
+  lectura.temperatura = 0.0f;
+  lectura.humedad = 0.0f;
+  lectura.valida = false;
   lectura.timestamp = ahora;
 
-  // ─── 1. Validación: NaN (sensor desconectado) ────────────────────
   if (isnan(humedad) || isnan(temperatura)) {
     contadorFallos_++;
     lectura.valida = false;
@@ -46,11 +37,7 @@ LecturaDHT SensorDHT::leer() {
     return lectura;
   }
 
-  // ─── 2. Validación: Rango físico plausible ────────────────────────
-  // Temperatura: -10°C a 60°C (rango operativo del DHT22)
-  // Humedad: 0% a 100%
-
-  if (temperatura < -10.0f || temperatura > 60.0f) {
+  if (temperatura < TEMP_MIN_VALIDA || temperatura > TEMP_MAX_VALIDA) {
     contadorFallos_++;
     lectura.valida = false;
 
@@ -64,7 +51,7 @@ LecturaDHT SensorDHT::leer() {
     return lectura;
   }
 
-  if (humedad < 0.0f || humedad > 100.0f) {
+  if (humedad < HUM_MIN_VALIDA || humedad > HUM_MAX_VALIDA) {
     contadorFallos_++;
     lectura.valida = false;
 
@@ -78,11 +65,10 @@ LecturaDHT SensorDHT::leer() {
     return lectura;
   }
 
-  // ─── 3. Lectura válida ────────────────────────────────────────────
   lectura.temperatura = temperatura;
   lectura.humedad = humedad;
   lectura.valida = true;
-  contadorFallos_ = 0;  // Reset del contador si fue exitosa
+  contadorFallos_ = 0;
   ultimaLectura_ = lectura;
 
   return lectura;

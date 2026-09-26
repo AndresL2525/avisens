@@ -16,6 +16,10 @@ void ConexionWiFi::comenzar()
   ESP_LOGI(TAG, "Iniciando conexión WiFi asíncrona...");
 
   WiFi.mode(WIFI_STA);
+  // El SDK reintenta por su cuenta cada ~2.4 s y reescribe las credenciales en NVS;
+  // esa escritura congela el otro core y corrompe los protocolos bit-bang de los sensores.
+  WiFi.persistent(false);
+  WiFi.setAutoReconnect(false);
   WiFi.setHostname(hostname_.c_str());
   WiFi.begin(ssid_, password_);
 
@@ -45,7 +49,6 @@ void ConexionWiFi::actualizar()
       Serial.println("⚠ WiFi desconectado");
     }
 
-    // Reintentar reconexión periódica
     if (ahora - ultimoIntento_ >= intervaloReconexion_)
     {
       ultimoIntento_ = ahora;

@@ -14,14 +14,11 @@ LecturaMQ135 SensorMQ135::leer() {
   unsigned long ahora = millis();
 
   int rawValue = analogRead(MQ135_PIN);
-  float voltaje = rawValue * (3.3f / 4095.0f);
-
-  // Aplicar filtro de media móvil
   int rawFiltrado = filtroRaw_.add(rawValue);
 
   LecturaMQ135 lectura;
   lectura.rawValue = rawFiltrado;
-  lectura.voltaje = rawFiltrado * (3.3f / 4095.0f);
+  lectura.voltaje = rawFiltrado * (ADC_VREF / ADC_MAX_CUENTAS);
   lectura.valida = true;
   lectura.timestamp = ahora;
 

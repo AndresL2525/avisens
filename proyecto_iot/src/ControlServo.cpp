@@ -10,9 +10,8 @@ ControlServo::ControlServo()
 void ControlServo::begin()
 {
   servo_.attach(SERVO_PIN);
-  // Inicia cerrada (a la izquierda)
   escribirServoCuidado(ANGULO_CERRADA);
-  delay(500); // Estabilizar servo en posición inicial
+  delay(500);  // Deja al servo alcanzar la posición inicial antes de arrancar las tareas
   LOG_DEBUG("ControlServo inicializado en posición CERRADA (0°)");
 }
 
@@ -26,13 +25,12 @@ void ControlServo::actualizar(bool hayPresencia)
     if (hayPresencia)
     {
       transicionar(EstadoPuerta::ABRIENDO);
-      escribirServoCuidado(ANGULO_ABIERTA); // Rota a la derecha (90°)
+      escribirServoCuidado(ANGULO_ABIERTA);
       LOG_DEBUG("Puerta: ABRIENDO a la derecha (90°)...");
     }
     break;
 
   case EstadoPuerta::ABRIENDO:
-    // Espera el tiempo de recorrido mecánico del servo
     if (ahora_ - tiempoEstado_ >= SERVO_DURACION_GIRO)
     {
       transicionar(EstadoPuerta::ABIERTA);
@@ -41,7 +39,6 @@ void ControlServo::actualizar(bool hayPresencia)
     break;
 
   case EstadoPuerta::ABIERTA:
-    // Si el sensor detecta presencia continua, reinicia la cuenta para evitar cerrarse encima
     if (hayPresencia)
     {
       tiempoEstado_ = ahora_;
@@ -49,13 +46,12 @@ void ControlServo::actualizar(bool hayPresencia)
     else if (ahora_ - tiempoEstado_ >= SERVO_TIEMPO_ABIERTA)
     {
       transicionar(EstadoPuerta::CERRANDO);
-      escribirServoCuidado(ANGULO_CERRADA); // Vuelve a la izquierda (0°)
+      escribirServoCuidado(ANGULO_CERRADA);
       LOG_DEBUG("Puerta: CERRANDO a la izquierda (0°)...");
     }
     break;
 
   case EstadoPuerta::CERRANDO:
-    // Espera que termine de regresar antes de permitir otra apertura
     if (ahora_ - tiempoEstado_ >= SERVO_DURACION_GIRO)
     {
       transicionar(EstadoPuerta::CERRADA);
@@ -88,5 +84,5 @@ void ControlServo::transicionar(EstadoPuerta nuevoEstado)
 void ControlServo::escribirServoCuidado(uint8_t angulo)
 {
   servo_.write(angulo);
-  vTaskDelay(pdMS_TO_TICKS(1));
+  vTaskDelay(pdMS_TO_TICKS(1));  // Cede el core mientras el canal PWM del servo conmuta
 }

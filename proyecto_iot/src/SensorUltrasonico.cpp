@@ -20,9 +20,7 @@ LecturaUltrasonico SensorUltrasonico::leer() {
   LecturaUltrasonico lectura = medirDistancia();
   lectura.timestamp = ahora;
 
-  // Procesamiento de resultado
   if (lectura.estado == EstadoSensorUltrasonico::OK) {
-    // Aplicar filtro de media móvil
     float distanciaFiltrada = filtroDistancia_.add(lectura.distancia);
     lectura.distancia = distanciaFiltrada;
     contadorFallos_ = 0;
@@ -38,8 +36,9 @@ LecturaUltrasonico SensorUltrasonico::leer() {
       LOG_ERROR("HC-SR04 fallo persistente — Entrando en ERROR");
       lectura.estado = EstadoSensorUltrasonico::ERROR;
     } else {
-      // Mantener última lectura válida si está disponible
-      lectura = ultimaLectura_;
+      // Se arrastra la última distancia conocida para no publicar un hueco,
+      // pero se conserva el estado de fallo: el consumidor debe saber que no es fresca.
+      lectura.distancia = ultimaLectura_.distancia;
     }
   }
 
@@ -73,30 +72,28 @@ LecturaUltrasonico SensorUltrasonico::medirDistancia() {
   resultado.distancia = -1.0f;
   resultado.timestamp = ahora;
 
-  // Generar pulso TRIG
+  // El HC-SR04 exige un TRIG en alto de 10 µs precedido de un flanco limpio
   digitalWrite(TRIG_AGUA, LOW);
   delayMicroseconds(2);
   digitalWrite(TRIG_AGUA, HIGH);
-  delayMicroseconds(10);
+  delayMicroseconds(TRIG_PULSO_US);
   digitalWrite(TRIG_AGUA, LOW);
 
-  // Esperar pulso ECHO con timeout de 30 ms (aprox. 400 cm)
-  long duracion = pulseIn(ECHO_AGUA, HIGH, 30000);
+  long duracion = pulseIn(ECHO_AGUA, HIGH, ECHO_TIMEOUT_US);
 
   if (duracion == 0) {
     resultado.estado = EstadoSensorUltrasonico::TIMEOUT;
     return resultado;
   }
 
-  // Cálculo: velocidad sonido = 343 m/s → 0.0343 cm/µs
-  float distancia = duracion * 0.0343f / 2.0f;
+  float distancia = duracion * VELOCIDAD_SONIDO_CM_US / 2.0f;
 
   if (distancia > MAX_DISTANCIA_AGUA) {
     resultado.estado = EstadoSensorUltrasonico::OUT_OF_RANGE;
     return resultado;
   }
 
-  if (distancia < 0.5f) {
+  if (distancia < MIN_DISTANCIA_AGUA) {
     resultado.estado = EstadoSensorUltrasonico::OUT_OF_RANGE;
     return resultado;
   }
